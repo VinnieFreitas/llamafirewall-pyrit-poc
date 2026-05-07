@@ -61,6 +61,41 @@ A personal lab proof-of-concept demonstrating a self-hosted LLM security pipelin
 
 ---
 
+## HuggingFace Setup — Do This Before Step 2
+
+PromptGuard 2 is a gated Meta model hosted on HuggingFace. "Gated" means you need a free account and must accept Meta's licence before the model can be downloaded. This is a one-time step.
+
+**1. Create a HuggingFace account**
+
+Go to https://huggingface.co/join and sign up for free.
+
+**2. Accept the model licence**
+
+Visit https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M and click **"Agree and access repository"**. Approval is instant — no waiting.
+
+**3. Generate a read token**
+
+Go to https://huggingface.co/settings/tokens → **New token** → Role: **Read** → give it a name (e.g. `llamapoc`) → **Generate token** → copy it somewhere safe.
+
+**4. Verify access from your laptop (optional but recommended)**
+
+```bash
+# Install the HuggingFace CLI if not present
+pip install huggingface_hub --quiet
+
+# Login
+hf auth login
+# Paste your token when prompted
+
+# Confirm you can see the model
+hf models ls --search "Llama-Prompt-Guard-2-86M"
+# Should return: meta-llama/Llama-Prompt-Guard-2-86M
+```
+
+> The `setup_vm.sh` script in Step 2 will prompt you for this token interactively during the VM setup. It stores it in the systemd service environment so the proxy can authenticate to HuggingFace on first model load — after that the weights are cached locally and no internet access is needed.
+
+---
+
 ## Step 1 — Deploy Azure Infrastructure
 
 ```bash
