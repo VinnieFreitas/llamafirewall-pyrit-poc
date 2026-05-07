@@ -178,7 +178,7 @@ ok "LlamaFirewall reachable at localhost:${TUNNEL_PORT}."
 log "Starting PyRIT red-team session..."
 echo ""
 
-python3 "${SCRIPT_DIR}/step3-pyrit/pyrit_redteam.py"
+python3 "${SCRIPT_DIR}/pyrit_redteam.py"
 
 echo ""
 ok "PyRIT run complete."
@@ -188,7 +188,7 @@ ok "PyRIT run complete."
 # ---------------------------------------------------------------------------
 log "Shipping results to Azure Log Analytics..."
 
-python3 "${SCRIPT_DIR}/step4-log-shipper/log_shipper.py" --mode pyrit
+python3 "${SCRIPT_DIR}/log_shipper.py" --mode pyrit
 
 ok "Results shipped to PyRITResults_CL."
 
