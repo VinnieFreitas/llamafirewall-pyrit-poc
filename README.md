@@ -240,6 +240,65 @@ This PoC uses only PromptGuard 2 for input scanning. Production would add:
 
 ---
 
+## Teardown — Ending a Test Session
+
+Run these steps in order at the end of every test session.
+
+**1. Stop the log shipper** (if running in live mode)
+```bash
+# Ctrl+C in the terminal running log_shipper.py --mode live
+```
+
+**2. Close the SSH tunnel**
+```bash
+kill $(cat /tmp/llamapoc_tunnel.pid)
+
+# Confirm it's gone
+pgrep -a ssh | grep 8080   # should return nothing
+```
+
+**3. Deallocate the VM** (most important — this stops compute billing)
+```bash
+az vm deallocate \
+  --resource-group rg-llamapoc \
+  --name llamapoc-vm \
+  --no-wait   # returns immediately, runs in background
+```
+
+> ⚠️ **Deallocate ≠ Shutdown.** Running `sudo shutdown` inside the VM stops the OS but Azure keeps billing for compute. Always use `az vm deallocate` from your laptop, or click **Stop** in the Azure portal (which deallocates automatically).
+
+**4. Verify the VM is deallocated**
+```bash
+az vm get-instance-view \
+  --resource-group rg-llamapoc \
+  --name llamapoc-vm \
+  --query "instanceView.statuses[1].displayStatus" \
+  -o tsv
+# Expected: "VM deallocated"
+```
+
+**Resuming the next day:**
+```bash
+# 1. Start the VM (~60 seconds)
+az vm start --resource-group rg-llamapoc --name llamapoc-vm
+
+# 2. Both services start automatically — verify after ~60 seconds
+ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
+  'sudo systemctl status ollama llamafirewall --no-pager | grep -E "●|Active"'
+
+# 3. Re-open the tunnel
+./step2-vm-setup/test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
+```
+
+**Full teardown (destroy everything):**
+```bash
+# Deletes ALL resources in the group — VM, disk, LAW, workbooks, everything.
+# Only do this when the PoC is completely finished.
+az group delete --name rg-llamapoc --yes --no-wait
+```
+
+---
+
 ## Security Notes
 
 - `deploy-outputs.json` contains your Log Analytics primary key — **never commit this file**
