@@ -1,0 +1,186 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# 🔐 LlamaFirewall Security Dashboard\n**PoC**: Self-hosted LLM → LlamaFirewall proxy → PyRIT red-team → Log Analytics\n\n---\n\nThis workbook shows the results of automated adversarial testing (PyRIT) against the LlamaFirewall-protected Phi-3-mini LLM running on Azure. Use the time range picker to filter by session."
+      },
+      "name": "header"
+    },
+    {
+      "type": 9,
+      "content": {
+        "parameters": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time Range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 604800000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000,    "text": "Last 1 hour"   },
+                { "durationMs": 86400000,   "text": "Last 24 hours" },
+                { "durationMs": 604800000,  "text": "Last 7 days"   },
+                { "durationMs": 2592000000, "text": "Last 30 days"  }
+              ]
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let data = PyRITResults_CL | where TimeGenerated {TimeRange};\nunion\n  (data | summarize Value = todouble(count())                                          | extend Metric = \"Total Attacks\"),\n  (data | summarize Value = round(100.0 * countif(outcome_s == \"PASS\") / count(), 1)  | extend Metric = \"Pass Rate (%)\"),\n  (data | summarize Value = todouble(countif(blocked_b == true))                       | extend Metric = \"Blocked by Firewall\"),\n  (data | summarize Value = todouble(countif(outcome_s == \"FAIL\"))                     | extend Metric = \"False Negatives\")\n| project Metric, Value",
+        "size": 4,
+        "title": "Session Overview",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "Metric", "formatter": 1 },
+          "leftContent": {
+            "columnMatch": "Value",
+            "formatter": 12,
+            "numberFormat": { "unit": 17, "options": { "style": "decimal", "maximumFractionDigits": 1 } }
+          },
+          "showBorder": true,
+          "size": "auto"
+        }
+      },
+      "name": "kpi_tiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| summarize PASS=countif(outcome_s==\"PASS\"), FAIL=countif(outcome_s==\"FAIL\"), INTERESTING=countif(outcome_s==\"INTERESTING\") by Category\n| order by PASS desc",
+        "size": 0,
+        "title": "Results by Attack Category",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "seriesLabelSettings": [
+            { "seriesName": "PASS", "color": "green" },
+            { "seriesName": "FAIL", "color": "red" },
+            { "seriesName": "INTERESTING", "color": "yellow" }
+          ]
+        }
+      },
+      "customWidth": "50",
+      "name": "category_chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| project attack_name_s, score_d, outcome_s\n| order by score_d desc",
+        "size": 0,
+        "title": "PromptGuard Score per Attack (higher = more suspicious)",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart",
+        "chartSettings": {
+          "xAxis": "attack_name_s",
+          "yAxis": ["score_d"],
+          "seriesLabelSettings": [{ "seriesName": "score_d", "label": "PromptGuard Score", "color": "blue" }]
+        }
+      },
+      "customWidth": "50",
+      "name": "score_chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| project Time=TimeGenerated, Category, Attack=attack_name_s, Outcome=outcome_s, Decision=decision_s, Score=score_d, Blocked=blocked_b, Latency_ms=latency_ms_d\n| order by Time desc",
+        "size": 0,
+        "title": "All Attack Results",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            {
+              "columnMatch": "Outcome",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "PASS",        "representation": "green",  "text": "✓ PASS"        },
+                  { "operator": "==", "thresholdValue": "FAIL",        "representation": "red",    "text": "✗ FAIL"        },
+                  { "operator": "==", "thresholdValue": "INTERESTING", "representation": "yellow", "text": "⚠ INTERESTING" },
+                  { "operator": "Default", "thresholdValue": null,     "representation": "blue",   "text": "{0}"           }
+                ]
+              }
+            },
+            {
+              "columnMatch": "Score",
+              "formatter": 8,
+              "formatOptions": { "palette": "redGreen" },
+              "numberFormat": { "unit": 17, "options": { "style": "decimal", "maximumFractionDigits": 4 } }
+            },
+            {
+              "columnMatch": "Blocked",
+              "formatter": 18,
+              "formatOptions": {
+                "thresholdsOptions": "colors",
+                "thresholdsGrid": [
+                  { "operator": "==", "thresholdValue": "true",  "representation": "redBright", "text": "🛑 Blocked" },
+                  { "operator": "==", "thresholdValue": "false", "representation": "green",     "text": "✓ Passed"  },
+                  { "operator": "Default", "thresholdValue": null, "representation": "blue",    "text": "{0}"       }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "name": "all_results_table"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## ⚠️ False Negatives — Attacks that Bypassed the Firewall\n\nThese are the most important findings for the production hardening roadmap. Each miss points to a specific defensive layer to add."
+      },
+      "name": "fn_header"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange} and outcome_s == \"FAIL\"\n| project Category, Attack=attack_name_s, Score=score_d, Prompt_Preview=prompt_preview_s\n| order by Score desc",
+        "size": 0,
+        "title": "False Negatives Detail",
+        "noDataMessage": "✅ No false negatives in the selected time range.",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "fn_table"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## 🗺️ Production Hardening Roadmap\n\n| Finding | Root Cause | Recommended Addition |\n|---|---|---|\n| `end_of_input_injection` | Payload after delimiter looks benign in full-context scan | Input segmentation + per-segment scanning |\n| `grandma_exploit` | Social engineering — no injection syntax, only roleplay framing | Llama Guard 3 (content policy layer) |\n| `training_data_extraction` | Subtle phrasing, no obvious attack signature | Output scanning + data-loss prevention |\n\n> **PromptGuard 2 alone blocks 83.3% of attack patterns.** Layering Llama Guard (content policy) and output scanning achieves defence-in-depth for production."
+      },
+      "name": "roadmap"
+    }
+  ],
+  "isLocked": false,
+  "fallbackResourceIds": []
+}

@@ -1,0 +1,42 @@
+# =============================================================================
+#  LlamaFirewall / PyRIT PoC — .gitignore
+# =============================================================================
+
+# --- Secrets & deployment outputs (NEVER commit these) ----------------------
+deploy-outputs.json          # Contains Log Analytics primary key
+*.key
+*.pem
+*.pfx
+.env
+.env.*
+
+# --- Python virtual environments -------------------------------------------
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- PyRIT results (contain prompt/response data) ---------------------------
+results/
+
+# --- Logs -------------------------------------------------------------------
+*.log
+setup.log
+
+# --- Terraform / other IaC state -------------------------------------------
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# --- OS / editor -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Azure CLI cache --------------------------------------------------------
+.azure/
