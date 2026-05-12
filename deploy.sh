@@ -156,3 +156,15 @@ echo "    SSH in first to verify connectivity:"
 echo ""
 echo "      ${SSH_CMD}"
 echo ""
+
+# ---------------------------------------------------------------------------
+#  Clear stale SSH known_hosts entries
+#  The VM got a new host key on this deployment. Remove any old entry so
+#  SSH doesn't throw the "REMOTE HOST IDENTIFICATION HAS CHANGED" warning.
+# ---------------------------------------------------------------------------
+
+echo "==> Clearing stale SSH known_hosts entries for this host..."
+ssh-keygen -f "${HOME}/.ssh/known_hosts" -R "${VM_FQDN}" 2>/dev/null || true
+ssh-keygen -f "${HOME}/.ssh/known_hosts" -R "${VM_IP}"   2>/dev/null || true
+echo "    Done. SSH will prompt to confirm the new host key on first connection."
+echo ""
