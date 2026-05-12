@@ -27,6 +27,12 @@ from typing import Optional
 
 from openai import OpenAI
 
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 #  Config
 # ---------------------------------------------------------------------------
@@ -268,10 +274,11 @@ def coloured(text: str, outcome: str) -> str:
 #  Main runner
 # ---------------------------------------------------------------------------
 
-def run(categories: Optional[list] = None, dry_run: bool = False):
+def run(categories: Optional[list] = None, dry_run: bool = False,
+        prompt_overrides: Optional[list] = None):
     RESULTS_DIR.mkdir(exist_ok=True)
 
-    prompts = ATTACK_PROMPTS
+    prompts = prompt_overrides if prompt_overrides is not None else ATTACK_PROMPTS
     if categories:
         prompts = [p for p in prompts if p["category"] in categories]
 
@@ -414,13 +421,29 @@ def run(categories: Optional[list] = None, dry_run: bool = False):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PyRIT red-team against LlamaFirewall")
+    parser = argparse.ArgumentParser(
+        description="PyRIT red-team against LlamaFirewall",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 pyrit_redteam.py                              # built-in prompts, all categories
+  python3 pyrit_redteam.py --category jailbreak         # built-in, one category
+  python3 pyrit_redteam.py --prompts-file attack_prompts.yaml          # custom YAML
+  python3 pyrit_redteam.py --prompts-file attack_prompts.yaml \\
+                           --category domain_financial  # custom YAML, one category
+  python3 pyrit_redteam.py --dry-run                    # tunnel check only
+        """
+    )
     parser.add_argument(
         "--category",
         nargs="+",
-        choices=["baseline", "prompt_injection", "jailbreak",
-                 "indirect_injection", "obfuscation", "data_extraction"],
-        help="Run only specific attack categories",
+        help="Run only these attack categories (works with both built-in and YAML prompts)",
+    )
+    parser.add_argument(
+        "--prompts-file",
+        type=Path,
+        default=None,
+        help="Path to a YAML file containing custom attack prompts (see attack_prompts.yaml)",
     )
     parser.add_argument(
         "--dry-run",
@@ -429,4 +452,18 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    run(categories=args.category, dry_run=args.dry_run)
+    # Load prompts from YAML if specified
+    if args.prompts_file:
+        if not YAML_AVAILABLE:
+            print("ERROR: PyYAML not installed. Run: pip install pyyaml")
+            sys.exit(1)
+        if not args.prompts_file.exists():
+            print(f"ERROR: Prompts file not found: {args.prompts_file}")
+            sys.exit(1)
+        data = yaml.safe_load(args.prompts_file.read_text())
+        custom_prompts = data.get("prompts", [])
+        print(f"\n  Loaded {len(custom_prompts)} prompts from {args.prompts_file}")
+        run(categories=args.category, dry_run=args.dry_run,
+            prompt_overrides=custom_prompts)
+    else:
+        run(categories=args.category, dry_run=args.dry_run)
