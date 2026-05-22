@@ -11,6 +11,9 @@ Scanner stack (input):
   2. HiddenASCII     — BiDi text, invisible characters, encoding tricks
   3. Regex (default) — built-in prompt injection, PII patterns
   4. custom_patterns — XSS, SQL injection, credential extraction, tool abuse
+  5. llama_guard3    — semantic content safety (Llama Guard 3:8B via Ollama)
+                       catches social engineering, subtle jailbreaks, content
+                       safety violations that pattern-based scanners miss
 
 Deployed to: /opt/llamafirewall/proxy.py
 Managed by:  llamafirewall.service (systemd)
@@ -39,6 +42,10 @@ from llamafirewall import (
 )
 from llamafirewall.llamafirewall import custom_scanner_registry
 from llamafirewall.scanners.regex_scanner import RegexScanner
+
+# Scanner base class — confirmed paths from introspection
+from llamafirewall.scanners.base_scanner import Scanner, ScanResult
+from llamafirewall.llamafirewall_data_types import ScanStatus
 
 # ---------------------------------------------------------------------------
 #  Structured JSON logger — output captured by systemd → journald
@@ -134,6 +141,135 @@ custom_scanner_registry["custom_patterns"] = CustomPatternScanner
 logger.info(f"Custom pattern scanner registered ({len(CustomPatternScanner.CUSTOM_PATTERNS)} patterns).")
 
 # ---------------------------------------------------------------------------
+#  Llama Guard 3 scanner
+#  Calls llama-guard3:8b running in Ollama (localhost:11434).
+#  Uses the MLCommons hazard taxonomy — catches social engineering, content
+#  safety violations, and subtle jailbreaks that PromptGuard 2 misses.
+#
+#  Enable:  already in scanner stack by default
+#  Disable: set env var LLAMA_GUARD_DISABLED=1 and restart llamafirewall
+#           sudo systemctl set-environment LLAMA_GUARD_DISABLED=1
+#           sudo systemctl restart llamafirewall
+# ---------------------------------------------------------------------------
+
+LLAMA_GUARD_DISABLED = os.environ.get("LLAMA_GUARD_DISABLED", "0").strip() == "1"
+
+# MLCommons hazard taxonomy — Llama Guard 3 category labels
+_LG3_CATEGORIES = {
+    "S1":  "Violent Crimes",
+    "S2":  "Non-Violent Crimes",
+    "S3":  "Sex Crimes",
+    "S4":  "Child Sexual Exploitation",
+    "S5":  "Defamation",
+    "S6":  "Specialized Advice",
+    "S7":  "Privacy",
+    "S8":  "Intellectual Property",
+    "S9":  "Indiscriminate Weapons",
+    "S10": "Hate",
+    "S11": "Self-Harm",
+    "S12": "Sexual Content",
+    "S13": "Elections",
+}
+
+
+class LlamaGuard3Scanner(Scanner):
+    """
+    Semantic content safety scanner using Llama Guard 3:8B via Ollama.
+    Catches intent-based threats that pattern/ML classifiers miss:
+    social engineering, fictional framing, emotional manipulation,
+    multi-turn escalation, and subtle jailbreaks.
+
+    Registered as 'llama_guard3' in the custom scanner registry.
+    Calls http://localhost:11434/api/chat — requires llama-guard3:8b to be
+    pulled: ollama pull llama-guard3:8b
+    """
+
+    OLLAMA_URL = "http://localhost:11434/api/chat"
+    OLLAMA_MODEL = "llama-guard3:8b"
+    # Timeout per scan — 8B on CPU takes ~5-15s for normal prompts.
+    # Very long prompts (>1000 chars) can take longer — set generously.
+    SCAN_TIMEOUT = 120.0
+    # Truncate prompts before sending to LlamaGuard3 — attack signals are
+    # almost always in the first 512 tokens (~2000 chars). Truncating avoids
+    # timeouts on adversarially long inputs like homoglyph-heavy code blocks.
+    MAX_INPUT_CHARS = 2000
+
+    def __init__(
+        self,
+        scanner_name: str = "LlamaGuard3Scanner",
+        block_threshold: float = 0.5,
+    ) -> None:
+        super().__init__(scanner_name, block_threshold)
+
+    async def scan(self, message, trace=None):  # type: ignore[override]
+        content = message.content if hasattr(message, "content") else str(message)
+
+        # Truncate very long prompts — attack signals are in the first ~2000
+        # chars. Adversarially long inputs (homoglyphs, code blocks) would
+        # otherwise cause timeouts on CPU inference.
+        if len(content) > self.MAX_INPUT_CHARS:
+            logger.debug(f"LlamaGuard3: truncating prompt from {len(content)} to {self.MAX_INPUT_CHARS} chars")
+            content = content[:self.MAX_INPUT_CHARS]
+
+        try:
+            async with httpx.AsyncClient(timeout=self.SCAN_TIMEOUT) as client:
+                resp = await client.post(
+                    self.OLLAMA_URL,
+                    json={
+                        "model":    self.OLLAMA_MODEL,
+                        "messages": [{"role": "user", "content": content}],
+                        "stream":   False,
+                    },
+                )
+            resp.raise_for_status()
+            result_text = resp.json()["message"]["content"].strip().lower()
+
+        except Exception as e:
+            # Fail CLOSED on network/model errors — if LlamaGuard3 can't scan
+            # (timeout, OOM, model unavailable), block the prompt.
+            # Security-first: an unscanned prompt is an unvetted prompt.
+            logger.warning(f"LlamaGuard3: scan error — {e}. Blocking prompt (fail-closed).")
+            return ScanResult(
+                decision=ScanDecision.BLOCK,
+                reason=f"LlamaGuard3: blocked (scan error — {str(e)[:80]})",
+                score=1.0,
+                status=ScanStatus.SUCCESS,
+            )
+
+        is_unsafe = result_text.startswith("unsafe")
+
+        if is_unsafe:
+            lines = result_text.split("\n")
+            raw_cats = lines[1].strip() if len(lines) > 1 else ""
+            cat_names = [
+                _LG3_CATEGORIES.get(c.strip().upper(), c.strip())
+                for c in raw_cats.split(",")
+                if c.strip()
+            ]
+            reason = f"LlamaGuard3: unsafe — {', '.join(cat_names) or raw_cats}"
+            return ScanResult(
+                decision=ScanDecision.BLOCK,
+                reason=reason,
+                score=1.0,
+                status=ScanStatus.SUCCESS,
+            )
+
+        return ScanResult(
+            decision=ScanDecision.ALLOW,
+            reason="LlamaGuard3: safe",
+            score=0.0,
+            status=ScanStatus.SUCCESS,
+        )
+
+
+# Register — only if not disabled via env var
+if not LLAMA_GUARD_DISABLED:
+    custom_scanner_registry["llama_guard3"] = LlamaGuard3Scanner
+    logger.info("LlamaGuard3 scanner registered (llama-guard3:8b via Ollama).")
+else:
+    logger.info("LlamaGuard3 scanner DISABLED (LLAMA_GUARD_DISABLED=1).")
+
+# ---------------------------------------------------------------------------
 #  LlamaFirewall — layered scanner stack
 #
 #  Scanners run in order; ANY block = final decision is BLOCK.
@@ -154,14 +290,18 @@ firewall = LlamaFirewall({
         ScannerType.HIDDEN_ASCII,   # Rule: BiDi, invisible chars, encoding tricks
         ScannerType.REGEX,          # Rule: prompt injection, PII patterns
         "custom_patterns",          # Rule: XSS, SQL, credentials, tool abuse
-    ],
+    ] + (["llama_guard3"] if not LLAMA_GUARD_DISABLED else []),
     Role.ASSISTANT: [],
     Role.SYSTEM:    [],
     Role.TOOL:      [],
     Role.MEMORY:    [],
 })
 
-logger.info("LlamaFirewall ready — 4 scanners active.")
+active_scanners = ["PromptGuard2", "HiddenASCII", "Regex", "CustomPatterns"]
+if not LLAMA_GUARD_DISABLED:
+    active_scanners.append("LlamaGuard3")
+
+logger.info(f"LlamaFirewall ready — {len(active_scanners)} scanners active: {active_scanners}")
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL    = "phi3:mini"
@@ -326,5 +466,5 @@ async def health():
     return {
         "status":   "ok",
         "service":  "llamafirewall-proxy",
-        "scanners": ["PromptGuard2", "HiddenASCII", "Regex", "CustomPatterns"],
+        "scanners": active_scanners,
     }
