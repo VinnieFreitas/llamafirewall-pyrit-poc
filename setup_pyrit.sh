@@ -22,6 +22,9 @@ PY_VERSION=$($PYTHON --version 2>&1)
 echo "  Found: ${PY_VERSION}"
 
 log "Creating virtual environment at ${VENV_DIR}..."
+# Auto-install python3-venv for the current Python version
+PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+sudo apt-get install -y -qq "python3.${PY_VER}-venv" 2>/dev/null || true
 $PYTHON -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 
