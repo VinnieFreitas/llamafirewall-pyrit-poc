@@ -10,7 +10,7 @@ using './main.bicep'
 
 // Paste the contents of ~/.ssh/id_rsa.pub (or id_ed25519.pub) here.
 // Generate one if you don't have it:  ssh-keygen -t ed25519 -C "llamapoc"
-param adminPublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH3C9UIzE5nuDVm8K+uEon6OJAY2tgId+vI4NNbVl0gx llamapoc'
+param adminPublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIANank1Xj0cdHHt7sBNBZM7Sso/gDWSofw5v23ObBpoE llamapoc'
 
 // --- Recommended to customise -------------------------------------------------
 
