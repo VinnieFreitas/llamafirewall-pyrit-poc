@@ -194,6 +194,31 @@ python3 pyrit_redteam.py --category jailbreak
 
 ---
 
+## NO_LLM Mode — Speed up PyRIT runs
+
+During red-team sessions you usually only care about LlamaFirewall's decision (BLOCK/ALLOW), not the actual LLM response. NO_LLM mode bypasses Ollama entirely for allowed prompts, cutting per-prompt latency from ~10-30s down to ~1-2s.
+
+```bash
+# Turn ON before a red-team run (fast mode)
+./toggle_nollm.sh on
+
+# Turn OFF when you need real LLM responses
+./toggle_nollm.sh off
+
+# Check current state
+./toggle_nollm.sh status
+```
+
+All three commands default to `azureuser@llamapoc-llama.eastus.cloudapp.azure.com`. Pass a different host as a second argument if needed:
+
+```bash
+./toggle_nollm.sh on azureuser@<other-vm-fqdn>
+```
+
+---
+
+---
+
 ## Step 4 — Ship Logs to Log Analytics
 
 ```bash
