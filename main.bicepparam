@@ -34,7 +34,7 @@ param adminUsername = 'azureuser'
 
 // Standard_B4ms = 4 vCPU / 16 GB — recommended
 // Standard_B2ms = 2 vCPU /  8 GB — only if very cost-constrained
-param vmSize = 'Standard_B4ms'
+param vmSize = 'Standard_B8ms'
 
 param osDiskSizeGB = 64
 
