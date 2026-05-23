@@ -45,6 +45,42 @@ read -rp "Continue with this subscription? [y/N] " CONFIRM
 [[ "${CONFIRM,,}" == "y" ]] || { echo "Aborted."; exit 0; }
 
 # ---------------------------------------------------------------------------
+#  Environment profile selection
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "============================================================"
+echo "  Select environment profile:"
+echo "============================================================"
+echo ""
+echo "  1) lab         — Standard_B8ms  (8 vCPU / 32 GB)"
+echo "                   phi3:mini · 30-day LAW · auto-shutdown"
+echo "                   ~\$16/month (light usage)"
+echo ""
+echo "  2) preprod     — Standard_D8s_v3 (8 vCPU / 32 GB)"
+echo "                   mistral:7b · 30-day LAW · auto-shutdown"
+echo "                   ~\$28/month (light usage)"
+echo ""
+echo "  3) production  — Standard_D16s_v3 (16 vCPU / 64 GB)"
+echo "                   llama3:8b · 90-day LAW · no auto-shutdown"
+echo "                   ~\$55/month (always on)"
+echo ""
+read -rp "Enter profile [1/2/3] (default: 1): " PROFILE_CHOICE
+
+case "${PROFILE_CHOICE}" in
+  2) PROFILE="preprod"    ;;
+  3) PROFILE="production" ;;
+  *) PROFILE="lab"        ;;
+esac
+
+echo ""
+echo "==> Selected profile: ${PROFILE}"
+echo ""
+
+# Update main.bicepparam with the selected profile
+sed -i "s/^param profile = .*/param profile = '${PROFILE}'/" "${SCRIPT_DIR}/main.bicepparam"
+
+# ---------------------------------------------------------------------------
 #  Check that adminPublicKey has been set in the params file
 # ---------------------------------------------------------------------------
 
@@ -97,12 +133,17 @@ echo "  Deployment complete! Save these values."
 echo "============================================================"
 echo ""
 
-VM_IP=$(echo "${DEPLOY_OUTPUT}"     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['vmPublicIP']['value'])")
-VM_FQDN=$(echo "${DEPLOY_OUTPUT}"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['vmFQDN']['value'])")
-SSH_CMD=$(echo "${DEPLOY_OUTPUT}"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sshCommand']['value'])")
-TUNNEL=$(echo "${DEPLOY_OUTPUT}"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sshTunnelCommand']['value'])")
-LAW_ID=$(echo "${DEPLOY_OUTPUT}"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['lawWorkspaceId']['value'])")
+VM_IP=$(echo "${DEPLOY_OUTPUT}"          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['vmPublicIP']['value'])")
+VM_FQDN=$(echo "${DEPLOY_OUTPUT}"        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['vmFQDN']['value'])")
+SSH_CMD=$(echo "${DEPLOY_OUTPUT}"        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sshCommand']['value'])")
+TUNNEL=$(echo "${DEPLOY_OUTPUT}"         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sshTunnelCommand']['value'])")
+LAW_ID=$(echo "${DEPLOY_OUTPUT}"         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['lawWorkspaceId']['value'])")
+PROFILE_USED=$(echo "${DEPLOY_OUTPUT}"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('activeProfile',{}).get('value','lab'))")
+VM_SIZE_USED=$(echo "${DEPLOY_OUTPUT}"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('vmSizeUsed',{}).get('value',''))")
+PROFILE_DESC=$(echo "${DEPLOY_OUTPUT}"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('profileDescription',{}).get('value',''))")
 
+echo "  Profile        : ${PROFILE_USED} — ${PROFILE_DESC}"
+echo "  VM Size        : ${VM_SIZE_USED}"
 echo "  VM Public IP   : ${VM_IP}"
 echo "  VM FQDN        : ${VM_FQDN}"
 echo ""

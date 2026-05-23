@@ -389,6 +389,25 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL    = "phi3:mini"
 
 # ---------------------------------------------------------------------------
+#  Profile-aware configuration — read from systemd environment
+#  Set by setup_vm.sh based on selected profile (lab/preprod/production).
+#  Override any value with: sudo systemctl set-environment KEY=value
+#                           sudo systemctl restart llamafirewall
+# ---------------------------------------------------------------------------
+
+PROFILE = os.environ.get("LLAMAFIREWALL_PROFILE", "lab")
+
+# PromptGuard 2 block threshold — lower = more aggressive
+# lab: 0.05  preprod: 0.10  production: 0.15
+BLOCK_THRESHOLD = float(os.environ.get("PROMPTGUARD_THRESHOLD", "0.05"))
+
+# Output scanning — scan assistant responses through LlamaGuard3
+# lab: off  preprod: on  production: on
+OUTPUT_SCAN_ENABLED = os.environ.get("OUTPUT_SCAN_ENABLED", "0").strip() == "1"
+
+logger.info(f"Profile: {PROFILE} | PG threshold: {BLOCK_THRESHOLD} | Output scan: {OUTPUT_SCAN_ENABLED}")
+
+# ---------------------------------------------------------------------------
 #  NO_LLM mode
 #  When enabled, allowed prompts get a stub response instead of hitting
 #  Ollama. Cuts per-prompt latency from ~10-30s to ~1-2s.
@@ -450,8 +469,7 @@ async def chat_completions(request: Request):
     scan_score    = getattr(scan_result, "score", 0.0)
     scan_reason   = getattr(scan_result, "reason", "")
 
-    # Custom threshold for PromptGuard 2 scores
-    BLOCK_THRESHOLD = 0.05
+    # Custom threshold — read from PROMPTGUARD_THRESHOLD env var (profile-driven)
     blocked = scan_score >= BLOCK_THRESHOLD
     if blocked:
         scan_decision = "BLOCK"
@@ -532,6 +550,38 @@ async def chat_completions(request: Request):
     except (KeyError, IndexError):
         pass
 
+    # Output scanning — preprod and production profiles only
+    # Scans assistant response through LlamaGuard3 for harmful content.
+    output_blocked = False
+    if OUTPUT_SCAN_ENABLED and response_text and not LLAMA_GUARD_DISABLED:
+        from llamafirewall import AssistantMessage
+        out_result   = await asyncio.to_thread(
+            firewall.scan, AssistantMessage(content=response_text)
+        )
+        output_blocked = out_result.decision == ScanDecision.BLOCK
+        if output_blocked:
+            logger.warning(f"Output scan BLOCKED response for request {request_id}")
+            emit_security_log(request_id, user_prompt, "OUTPUT_BLOCK",
+                              getattr(out_result, "score", 1.0), True,
+                              getattr(out_result, "reason", "output scan"),
+                              response_text[:120], (time.monotonic() - t_start) * 1000)
+            return JSONResponse(content={
+                "id":      f"chatcmpl-{request_id}",
+                "object":  "chat.completion",
+                "model":   OLLAMA_MODEL,
+                "choices": [{"index": 0, "message": {
+                    "role":    "assistant",
+                    "content": "[BLOCKED by LlamaFirewall — unsafe response detected]",
+                }, "finish_reason": "content_filter"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "x_llamafirewall": {
+                    "blocked":    True,
+                    "decision":   "OUTPUT_BLOCK",
+                    "score":      getattr(out_result, "score", 1.0),
+                    "request_id": request_id,
+                },
+            })
+
     emit_security_log(request_id, user_prompt, scan_decision, scan_score,
                       False, scan_reason, response_text,
                       (time.monotonic() - t_start) * 1000)
@@ -552,7 +602,10 @@ async def chat_completions(request: Request):
 @app.get("/health")
 async def health():
     return {
-        "status":   "ok",
-        "service":  "llamafirewall-proxy",
-        "scanners": active_scanners,
+        "status":        "ok",
+        "service":       "llamafirewall-proxy",
+        "profile":       PROFILE,
+        "pg_threshold":  BLOCK_THRESHOLD,
+        "output_scan":   OUTPUT_SCAN_ENABLED,
+        "scanners":      active_scanners,
     }
