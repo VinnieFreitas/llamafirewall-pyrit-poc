@@ -103,6 +103,12 @@ All files live in the repo root — no subdirectories.
   - [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
 - HuggingFace read token from https://huggingface.co/settings/tokens
 
+After cloning the repo, make all scripts executable:
+
+```bash
+chmod +x *.sh
+```
+
 > LlamaGuard 3:8B is pulled via Ollama — no HuggingFace token needed for it.
 
 ---
@@ -202,7 +208,7 @@ chmod +x test_tunnel.sh
 
 Expected: `/health` shows 6 active scanners, clean prompt → ALLOW, injection → BLOCK.
 
-**Always warm up models before running PyRIT** — cold models cause timeouts:
+**Always warm up models before running PyRIT or test_tunnel.sh** — after a VM restart, models are evicted from RAM. Cold models cause LlamaGuard3 to timeout (~120s per prompt) on first requests. Warm-up takes 60-90 seconds and only needs to be done once per session:
 
 ```bash
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
@@ -374,8 +380,15 @@ az vm get-instance-view --resource-group rg-llamapoc --name llamapoc-vm \
 **Resuming:**
 ```bash
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
-# Wait ~60s, then open tunnel and warm models
+# Wait ~60s, then open tunnel
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
+# Warm up models before running PyRIT
+ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
+curl -sf http://localhost:11434/api/generate \
+  -d '{"model":"llama-guard3:8b","prompt":"hello","stream":false}' > /dev/null && echo "llama-guard3 warm"
+curl -sf http://localhost:11434/api/generate \
+  -d '{"model":"phi3:mini","prompt":"hello","stream":false}' > /dev/null && echo "phi3:mini warm"
+EOF
 ```
 
 **Full destroy (wipe everything):**
