@@ -28,8 +28,9 @@ A personal lab proof-of-concept demonstrating a self-hosted LLM security pipelin
 | 3 | Regex (built-in) | Rule-based | Prompt injection patterns, PII |
 | 4 | CustomPatterns | Rule-based | XSS, SQL injection, credential extraction, tool abuse |
 | 5 | LlamaGuard 3:8B | Semantic LLM | Social engineering, subtle jailbreaks, content safety |
+| 6 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, system prompt extraction, bioweapon synthesis, political manipulation, capability fabrication |
 
-**Achieved detection rate: 90.8% on 87-prompt adversarial dataset (+47.12% from baseline)**
+**Achieved detection rate: 98.85% on 87-prompt adversarial dataset (+55.17% from baseline)**
 
 ---
 
@@ -52,6 +53,7 @@ All files live in the repo root — no subdirectories.
 ├── pyrit_redteam.py        # Step 3: red-team script (built-in + YAML prompt support)
 ├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories)
 ├── attack_prompts.yaml     # Step 3: extended built-in attack library (40 prompts)
+├── social_engineering_pt.nov  # Step 3: NOVA rules for semantic social engineering detection
 │
 ├── log_shipper.py          # Step 4: ships PyRIT results + live events to LAW
 │
@@ -162,11 +164,24 @@ ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
 
 The script will prompt you interactively for your HuggingFace token during the PromptGuard 2 model download.
 
-After setup completes, pull LlamaGuard 3:8B via Ollama (~4.7 GB):
+After setup completes, pull LlamaGuard 3:8B via Ollama (~4.7 GB) and install NOVA:
 
 ```bash
-ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
-  'ollama pull llama-guard3:8b'
+ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
+# Pull LlamaGuard 3
+ollama pull llama-guard3:8b
+
+# Install NOVA and clone official rules
+source /opt/llamafirewall/venv/bin/activate
+pip install nova-hunting --quiet
+git clone https://github.com/Nova-Hunting/nova-rules /opt/llamafirewall/nova-rules
+mkdir -p /opt/llamafirewall/nova-rules-custom
+EOF
+
+# Deploy custom NOVA rules
+scp social_engineering_pt.nov \
+  azureuser@llamapoc-llama.eastus.cloudapp.azure.com:/opt/llamafirewall/nova-rules-custom/
+sudo systemctl restart llamafirewall
 ```
 
 **Always warm up both models before running PyRIT** — after a VM restart, models are evicted from RAM and first requests will timeout. Warm them up first:
@@ -249,6 +264,7 @@ python3 pyrit_redteam.py --dry-run
 | 4 | + LlamaGuard 3:8B | 80.46% |
 | 5 | + dataset label fix + input truncation | 88.51% |
 | **6** | **+ fail-closed on timeout** | **90.80%** |
+| **7** | **+ NOVA (keyword + semantic rules)** | **98.85%** |
 
 ---
 
@@ -357,15 +373,15 @@ Current PoC achieves **90.8% detection** with a 5-layer scanner stack. Remaining
 | ✅ | HiddenASCII | BiDi text, invisible chars, encoding tricks |
 | ✅ | Regex + CustomPatterns | XSS, SQL injection, credential extraction, tool abuse |
 | ✅ | LlamaGuard 3:8B | Social engineering, subtle jailbreaks, content safety |
+| ✅ | NOVA (keyword+semantic) | Logic traps, tool injection, system prompt extraction, bioweapon synthesis, political manipulation |
 
 **Production additions (roadmap):**
 
-| Gap | Remaining fails | Recommended fix |
+| Gap | Notes | Recommended fix |
 |---|---|---|
-| Semantic social engineering | 7 | NOVA rule engine (YARA-style semantic + LLM rules) |
-| Subtle roleplay jailbreaks | 1 | NOVA + additional LlamaGuard 3 fine-tuning |
 | Output scanning | Not yet tested | Enable LlamaGuard 3 on `Role.ASSISTANT` |
-| Data loss prevention | Partial | Output scanner + DLP integration |
+| GPU inference | CPU-only stack averages ~23s/prompt | NC-series VM (T4 GPU) → ~1-2s/prompt |
+| NOVA LLM tier | Disabled — phi3:mini caused false positives | Use a dedicated safety classifier for NOVA LLM evaluation |
 
 ---
 

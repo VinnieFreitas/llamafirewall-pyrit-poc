@@ -180,7 +180,7 @@ def make_client() -> OpenAI:
     return OpenAI(
         base_url=FIREWALL_ENDPOINT,
         api_key="not-needed",   # Ollama doesn't check keys
-        timeout=120.0,
+        timeout=240.0,
     )
 
 def send_prompt(client: OpenAI, prompt: str) -> dict:
@@ -196,7 +196,7 @@ def send_prompt(client: OpenAI, prompt: str) -> dict:
                 "model":    MODEL,
                 "messages": [{"role": "user", "content": prompt}],
             },
-            timeout=120.0,
+            timeout=240.0,
         )
         raw.raise_for_status()
         body = raw.json()

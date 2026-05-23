@@ -141,6 +141,86 @@ custom_scanner_registry["custom_patterns"] = CustomPatternScanner
 logger.info(f"Custom pattern scanner registered ({len(CustomPatternScanner.CUSTOM_PATTERNS)} patterns).")
 
 # ---------------------------------------------------------------------------
+#  NOVA scanner
+#  YARA-inspired rule engine combining keyword, semantic, and LLM detection.
+#  Targets semantic social engineering attacks that PromptGuard and rule-based
+#  scanners miss: logic traps, capability fabrication, political manipulation,
+#  bioweapon synthesis disguised as academic curiosity, system prompt extraction.
+#
+#  Rules file: /opt/llamafirewall/nova-rules-custom/social_engineering_pt.nov
+#  LLM tier  : llama-guard3:8b via Ollama (already running on this VM)
+#
+#  Disable:  sudo systemctl set-environment NOVA_DISABLED=1
+#            sudo systemctl restart llamafirewall
+# ---------------------------------------------------------------------------
+
+NOVA_DISABLED = os.environ.get("NOVA_DISABLED", "0").strip() == "1"
+NOVA_RULES_PATH = "/opt/llamafirewall/nova-rules-custom/social_engineering_pt.nov"
+
+_nova_matchers: list = []
+
+def _init_nova():
+    """Load and compile NOVA rules at service startup."""
+    global _nova_matchers
+    if NOVA_DISABLED:
+        logger.info("NOVA scanner DISABLED (NOVA_DISABLED=1).")
+        return
+    if not _re.path.exists(NOVA_RULES_PATH) if hasattr(_re, 'path') else not __import__('os').path.exists(NOVA_RULES_PATH):
+        logger.warning(f"NOVA rules file not found: {NOVA_RULES_PATH}. Scanner disabled.")
+        return
+    try:
+        import re as _stdlib_re
+        from nova.core.parser import NovaParser
+        from nova.evaluators.llm import OllamaEvaluator
+        from nova import NovaMatcher as _NovaMatcher
+
+        content = open(NOVA_RULES_PATH, encoding="utf-8").read()
+        blocks  = _stdlib_re.split(r'(?=^rule\s+\w+\s*\{)', content, flags=_stdlib_re.MULTILINE)
+        parser  = NovaParser()
+        for block in blocks:
+            block = block.strip()
+            if block.startswith("rule "):
+                try:
+                    rule = parser.parse(block)
+                    # Disable LLM tier — phi3:mini is not a safety classifier
+                    # and causes false positives on benign prompts. LlamaGuard3
+                    # already provides semantic LLM coverage in the stack.
+                    # NOVA contributes keyword + semantic similarity layers only.
+                    _nova_matchers.append(_NovaMatcher(
+                        rule,
+                        llm_evaluator=None,
+                        create_llm_evaluator=False,
+                    ))
+                    logger.info(f"NOVA rule loaded: {rule.name}")
+                except Exception as e:
+                    logger.warning(f"NOVA rule parse error: {e}")
+
+        logger.info(f"NOVA scanner ready — {len(_nova_matchers)} rules loaded.")
+    except Exception as e:
+        logger.warning(f"NOVA scanner init failed: {e}. Scanner disabled.")
+
+_init_nova()
+
+
+def _nova_scan(prompt: str) -> tuple[bool, str]:
+    """
+    Run NOVA rules sequentially against prompt.
+    Returns (blocked, matched_rule_name) on first match.
+    Fails open on error — NOVA is an additional layer, not the primary gate.
+    Sequential is safer than parallel on CPU-only VMs running multiple LLMs.
+    """
+    if not _nova_matchers:
+        return False, ""
+    for matcher in _nova_matchers:
+        try:
+            result = matcher.check_prompt(prompt)
+            if result and result.get("matched"):
+                return True, matcher.rule.name
+        except Exception as e:
+            logger.warning(f"NOVA rule {matcher.rule.name} error: {e}")
+    return False, ""
+
+# ---------------------------------------------------------------------------
 #  Llama Guard 3 scanner
 #  Calls llama-guard3:8b running in Ollama (localhost:11434).
 #  Uses the MLCommons hazard taxonomy — catches social engineering, content
@@ -300,6 +380,8 @@ firewall = LlamaFirewall({
 active_scanners = ["PromptGuard2", "HiddenASCII", "Regex", "CustomPatterns"]
 if not LLAMA_GUARD_DISABLED:
     active_scanners.append("LlamaGuard3")
+if not NOVA_DISABLED and _nova_matchers:
+    active_scanners.append(f"NOVA({len(_nova_matchers)}rules)")
 
 logger.info(f"LlamaFirewall ready — {len(active_scanners)} scanners active: {active_scanners}")
 
@@ -368,17 +450,23 @@ async def chat_completions(request: Request):
     scan_score    = getattr(scan_result, "score", 0.0)
     scan_reason   = getattr(scan_result, "reason", "")
 
-    # ---------------------------------------------------------------------------
-    #  Custom threshold — applies to PromptGuard 2 scores.
-    #  REGEX / HIDDEN_ASCII / custom_patterns block at score 1.0 (always passes).
-    #  This threshold catches marginal PromptGuard scores (0.05-0.49) that the
-    #  internal decision would have allowed.
-    #  Baseline prompts score <0.003 — no false positive risk at 0.05.
-    # ---------------------------------------------------------------------------
+    # Custom threshold for PromptGuard 2 scores
     BLOCK_THRESHOLD = 0.05
     blocked = scan_score >= BLOCK_THRESHOLD
     if blocked:
         scan_decision = "BLOCK"
+
+    # NOVA scanner — runs after LlamaFirewall stack
+    # Targets semantic social engineering that pattern/ML scanners miss.
+    # Fail-open: if NOVA errors, the prompt continues to LlamaFirewall's decision.
+    if not blocked and _nova_matchers:
+        nova_blocked, nova_rule = await asyncio.to_thread(_nova_scan, user_prompt)
+        if nova_blocked:
+            blocked       = True
+            scan_decision = "BLOCK"
+            scan_reason   = f"NOVA:{nova_rule}"
+            scan_score    = 1.0
+            logger.info(f"NOVA blocked prompt — rule: {nova_rule}")
 
     if blocked:
         emit_security_log(request_id, user_prompt, scan_decision, scan_score,
