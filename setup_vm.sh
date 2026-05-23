@@ -13,6 +13,10 @@
 #    lab        — phi3:mini    · threshold 0.05 · no output scan  · ~20 min
 #    preprod    — mistral:7b   · threshold 0.10 · output scan on  · ~35 min
 #    production — llama3:8b   · threshold 0.15 · output scan on  · ~45 min
+#
+#  Prerequisites:
+#    - HuggingFace account + access to meta-llama/Llama-Prompt-Guard-2-86M
+#    - HuggingFace read token from https://huggingface.co/settings/tokens
 # =============================================================================
 
 set -euo pipefail
@@ -28,13 +32,14 @@ SERVICE_USER="azureuser"
 FIREWALL_PORT=8080
 OLLAMA_PORT=11434
 
+# Initialised here — overwritten after HuggingFace login in section 6
+HF_TOKEN=""
+
 # =============================================================================
 #  PROFILE SELECTION
 # =============================================================================
 
 PROFILE="${1:-}"
-
-# Strip --profile flag if passed
 [[ "${PROFILE}" == "--profile" ]] && PROFILE="${2:-}"
 [[ "${PROFILE}" == --profile=* ]] && PROFILE="${PROFILE#--profile=}"
 
@@ -91,353 +96,210 @@ echo "  Output scanning  : ${OUTPUT_SCAN}"
 echo "  NOVA LLM tier    : ${NOVA_LLM}"
 echo ""
 
-# Initialised here — overwritten after HuggingFace login in section 6
-HF_TOKEN=""
+# =============================================================================
+#  PREFLIGHT — wait for any background apt processes to finish
+# =============================================================================
+log "Waiting for apt lock..."
+LOCK_WAIT=0
+while sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    sleep 3; LOCK_WAIT=$((LOCK_WAIT + 3))
+    [[ $LOCK_WAIT -gt 120 ]] && {
+        warn "apt lock held >2 min — clearing"
+        sudo killall apt apt-get 2>/dev/null || true
+        sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock \
+                   /var/lib/dpkg/lock-frontend
+        sudo dpkg --configure -a
+        break
+    }
+done
 
 # =============================================================================
 #  1. SYSTEM PACKAGES
 # =============================================================================
-
 log "Updating system packages..."
 sudo apt-get update -qq
 sudo apt-get upgrade -y -qq
 
-log "Installing system dependencies..."
+log "Installing dependencies..."
 sudo apt-get install -y -qq \
-  python3 python3-pip python3-venv python3-dev \
-  git curl wget build-essential \
-  jq net-tools
-
-ok "System packages installed."
+    python3 python3-pip python3-venv python3-dev \
+    git curl wget build-essential jq net-tools
+ok "System packages ready."
 
 # =============================================================================
 #  2. OLLAMA
 # =============================================================================
-
 log "Installing Ollama..."
 if command -v ollama &>/dev/null; then
-  warn "Ollama already installed — skipping."
+    warn "Ollama already installed — skipping."
 else
-  curl -fsSL https://ollama.com/install.sh | sudo bash
-  ok "Ollama installed."
+    curl -fsSL https://ollama.com/install.sh | sudo bash
+    ok "Ollama installed."
 fi
 
-# Ollama's install script creates ollama.service, but it runs as the 'ollama'
-# system user. We need it accessible on localhost:11434.
-log "Ensuring Ollama service is running..."
 sudo systemctl enable ollama --quiet
 sudo systemctl start  ollama
 
-# Wait for Ollama to be ready
-log "Waiting for Ollama API to become available..."
+log "Waiting for Ollama API..."
 RETRIES=20
 until curl -sf http://localhost:${OLLAMA_PORT}/api/tags >/dev/null 2>&1; do
-  RETRIES=$((RETRIES - 1))
-  [[ $RETRIES -le 0 ]] && fail "Ollama API did not become available in time."
-  sleep 3
+    RETRIES=$((RETRIES-1)); [[ $RETRIES -le 0 ]] && fail "Ollama API timeout."; sleep 3
 done
-ok "Ollama is up at localhost:${OLLAMA_PORT}."
+ok "Ollama up at localhost:${OLLAMA_PORT}."
 
-log "Pulling model: ${OLLAMA_MODEL} (this may take several minutes)..."
+log "Pulling model: ${OLLAMA_MODEL}..."
 ollama pull "${OLLAMA_MODEL}"
-ok "Model ${OLLAMA_MODEL} is ready."
+ok "Model ${OLLAMA_MODEL} ready."
 
-# Quick smoke-test via REST API (avoids the interactive-mode hang of 'ollama run')
+# Smoke-test via REST API (avoids the interactive-mode hang of 'ollama run')
 log "Smoke-testing Ollama REST API..."
 SMOKE=$(curl -sf --max-time 60 \
     http://localhost:${OLLAMA_PORT}/api/generate \
     -d "{\"model\":\"${OLLAMA_MODEL}\",\"prompt\":\"Reply with the single word OK.\",\"stream\":false}" \
     2>/dev/null || true)
 if echo "${SMOKE}" | grep -qi "ok"; then
-  ok "Ollama smoke-test passed."
+    ok "Ollama smoke-test passed."
 else
-  warn "Model responded but not with expected output. This is usually fine."
-  echo "  Got: ${RESPONSE}"
+    warn "Smoke-test inconclusive — continuing (model may still be warming up)."
 fi
 
 # =============================================================================
-#  3. PYTHON VIRTUAL ENVIRONMENT
+#  3. PULL LLAMA GUARD 3:8B
 # =============================================================================
+log "Pulling LlamaGuard 3:8B (~4.7 GB)..."
+ollama pull llama-guard3:8b
+ok "llama-guard3:8b ready."
 
+# =============================================================================
+#  4. PYTHON VENV + PACKAGES
+# =============================================================================
 log "Creating Python venv at ${INSTALL_DIR}..."
 sudo mkdir -p "${INSTALL_DIR}"
 sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}"
 
+PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+sudo apt-get install -y -qq "python3.${PY_VER}-venv" 2>/dev/null || true
+
 python3 -m venv "${INSTALL_DIR}/venv"
 source "${INSTALL_DIR}/venv/bin/activate"
-
-log "Upgrading pip..."
 pip install --upgrade pip --quiet
 
-# =============================================================================
-#  4. LLAMAFIREWALL
-# =============================================================================
+log "Installing LlamaFirewall and dependencies (~2 GB for torch)..."
+pip install llamafirewall transformers torch fastapi uvicorn httpx --quiet
+ok "Python packages installed."
 
-log "Installing LlamaFirewall and dependencies..."
-
-# Core LlamaFirewall package from PyPI
-pip install llamafirewall --quiet
-
-# PromptGuard 2 scanner dependencies
-# PromptGuard 2 (86M) runs locally — no API key needed, lightweight enough
-# for B4ms alongside Phi-3-mini.
-pip install transformers torch --quiet
-# Note: torch pulls ~2 GB. If disk is tight, consider torch-cpu:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# OpenAI-compatible proxy layer (used to expose LlamaFirewall as an API)
-pip install openai fastapi uvicorn httpx --quiet
-
-ok "LlamaFirewall packages installed."
+log "Installing NOVA prompt pattern matching engine..."
+pip install nova-hunting --quiet
+ok "nova-hunting installed."
 
 # =============================================================================
-#  5. LLAMAFIREWALL PROXY APPLICATION
-#  This is a thin FastAPI wrapper that:
-#    - Accepts OpenAI-compatible chat/completions requests on :8080
-#    - Runs the input through LlamaFirewall scanners
-#    - Forwards clean requests to Ollama on :11434
-#    - Runs the response through output scanners
-#    - Returns the result (or a block message)
-#    - Emits structured JSON logs to stdout (captured by systemd → journald)
+#  5. HFFOLDER COMPATIBILITY PATCH
 # =============================================================================
+log "Patching LlamaFirewall for huggingface_hub >= 0.25 compatibility..."
 
-log "Writing LlamaFirewall proxy application..."
+PG_UTILS="${INSTALL_DIR}/venv/lib/python3.10/site-packages/llamafirewall/scanners/promptguard_utils.py"
+[[ ! -f "${PG_UTILS}" ]] && fail "promptguard_utils.py not found."
 
-cat > "${INSTALL_DIR}/proxy.py" << 'PROXY_EOF'
-"""
-LlamaFirewall Proxy — OpenAI-compatible endpoint on :8080
-Sits between PyRIT (caller) and Ollama (LLM backend).
+python3 - << PYEOF
+path = "${PG_UTILS}"
+content = open(path).read()
+old = "from huggingface_hub import HfFolder, login"
+new = """from huggingface_hub import login
+try:
+    from huggingface_hub import HfFolder
+except ImportError:
+    import huggingface_hub as _hf
+    class HfFolder:
+        @staticmethod
+        def get_token():
+            return _hf.get_token()
+        @staticmethod
+        def save_token(token: str) -> None:
+            pass"""
+if old in content:
+    open(path, "w").write(content.replace(old, new))
+    print("  Patch applied.")
+elif "class HfFolder" in content:
+    print("  Patch already applied — skipping.")
+else:
+    print("  WARNING: Target string not found.")
+PYEOF
 
-Scanner stack (PoC — lightweight):
-  Input:   PromptGuard 2  — prompt injection / jailbreak detection
-  Output:  (disabled in PoC to save RAM; enable AgentAlignmentCheck for prod)
-
-Logs every request/response as structured JSON to stdout.
-Systemd captures this into journald; the log shipper in step 4 reads it.
-"""
-
-import json
-import logging
-import sys
-import time
-import uuid
-from datetime import datetime, timezone
-
-import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-
-# LlamaFirewall imports
-from llamafirewall import (
-    LlamaFirewall,
-    ScannerType,
-    UserMessage,
-    AssistantMessage,
-    ScanDecision,
-)
-
-# ---------------------------------------------------------------------------
-#  Logging — structured JSON to stdout
-# ---------------------------------------------------------------------------
-
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "level":      record.levelname,
-            "logger":     record.name,
-            "message":    record.getMessage(),
-        }
-        if hasattr(record, "extra"):
-            log_obj.update(record.extra)
-        return json.dumps(log_obj)
-
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(JSONFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[handler])
-logger = logging.getLogger("llamafirewall.proxy")
-
-# ---------------------------------------------------------------------------
-#  LlamaFirewall instance
-#  Using PromptGuard 2 (86M params) for input scanning.
-#  Model is downloaded from HuggingFace on first start (~170 MB).
-# ---------------------------------------------------------------------------
-
-logger.info("Initialising LlamaFirewall scanners...")
-
-firewall = LlamaFirewall(
-    scanners=[
-        ScannerType.PROMPT_GUARD,   # Input: detects prompt injection / jailbreaks
-        # ScannerType.LLAMA_GUARD,  # Input+Output: content safety (needs 8B model — skip for PoC)
-        # ScannerType.CODE_SHIELD,  # Output: detects malicious code generation
-    ]
-)
-
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "phi3:mini"
-
-app = FastAPI(title="LlamaFirewall Proxy", version="0.1.0")
-
-# ---------------------------------------------------------------------------
-#  Helper — emit a structured security event log
-# ---------------------------------------------------------------------------
-
-def emit_security_log(
-    request_id: str,
-    prompt: str,
-    scan_decision: str,
-    scan_score: float,
-    blocked: bool,
-    response_text: str = "",
-    latency_ms: float = 0.0,
-):
-    logger.info(
-        "security_event",
-        extra={
-            "event_type":     "llm_request",
-            "request_id":     request_id,
-            "blocked":        blocked,
-            "scan_decision":  scan_decision,
-            "scan_score":     round(scan_score, 4),
-            "prompt_length":  len(prompt),
-            "prompt_preview": prompt[:120].replace("\n", " "),
-            "response_length": len(response_text),
-            "latency_ms":     round(latency_ms, 1),
-        },
-    )
-
-# ---------------------------------------------------------------------------
-#  POST /v1/chat/completions  — OpenAI-compatible endpoint
-# ---------------------------------------------------------------------------
-
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    t_start = time.monotonic()
-    request_id = str(uuid.uuid4())
-
-    body = await request.json()
-    messages = body.get("messages", [])
-
-    if not messages:
-        raise HTTPException(status_code=400, detail="No messages provided.")
-
-    # Extract the last user turn for scanning
-    user_prompt = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            user_prompt = content if isinstance(content, str) else str(content)
-            break
-
-    # -----------------------------------------------------------------------
-    #  Input scan — PromptGuard 2
-    # -----------------------------------------------------------------------
-    scan_result   = firewall.scan(UserMessage(content=user_prompt))
-    scan_decision = scan_result.decision.name          # "ALLOW" or "BLOCK"
-    scan_score    = getattr(scan_result, "score", 0.0)
-    blocked       = scan_result.decision == ScanDecision.BLOCK
-
-    if blocked:
-        emit_security_log(
-            request_id   = request_id,
-            prompt       = user_prompt,
-            scan_decision= scan_decision,
-            scan_score   = scan_score,
-            blocked      = True,
-            latency_ms   = (time.monotonic() - t_start) * 1000,
-        )
-        # Return an OpenAI-shaped refusal so PyRIT can parse it normally
-        return JSONResponse(
-            status_code=200,
-            content={
-                "id":      f"chatcmpl-{request_id}",
-                "object":  "chat.completion",
-                "model":   OLLAMA_MODEL,
-                "choices": [{
-                    "index":         0,
-                    "message": {
-                        "role":    "assistant",
-                        "content": "[BLOCKED by LlamaFirewall — prompt injection or jailbreak detected]",
-                    },
-                    "finish_reason": "content_filter",
-                }],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "x_llamafirewall": {
-                    "blocked":   True,
-                    "decision":  scan_decision,
-                    "score":     scan_score,
-                    "request_id": request_id,
-                },
-            },
-        )
-
-    # -----------------------------------------------------------------------
-    #  Forward to Ollama (OpenAI-compatible endpoint)
-    # -----------------------------------------------------------------------
-    ollama_payload = {
-        "model":    body.get("model", OLLAMA_MODEL),
-        "messages": messages,
-        "stream":   False,
-    }
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        ollama_resp = await client.post(
-            f"{OLLAMA_BASE_URL}/v1/chat/completions",
-            json=ollama_payload,
-        )
-
-    if ollama_resp.status_code != 200:
-        raise HTTPException(
-            status_code=ollama_resp.status_code,
-            detail=f"Ollama error: {ollama_resp.text}",
-        )
-
-    ollama_body  = ollama_resp.json()
-    response_text = ""
-    try:
-        response_text = ollama_body["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        pass
-
-    latency_ms = (time.monotonic() - t_start) * 1000
-
-    emit_security_log(
-        request_id   = request_id,
-        prompt       = user_prompt,
-        scan_decision= scan_decision,
-        scan_score   = scan_score,
-        blocked      = False,
-        response_text= response_text,
-        latency_ms   = latency_ms,
-    )
-
-    # Inject our metadata into the response for observability
-    ollama_body.setdefault("x_llamafirewall", {
-        "blocked":    False,
-        "decision":   scan_decision,
-        "score":      scan_score,
-        "request_id": request_id,
-    })
-
-    return JSONResponse(content=ollama_body)
-
-# ---------------------------------------------------------------------------
-#  GET /health
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "llamafirewall-proxy"}
-
-PROXY_EOF
-
-ok "Proxy application written to ${INSTALL_DIR}/proxy.py."
+python3 -c "
+from llamafirewall import LlamaFirewall, ScannerType, Role, UserMessage, ScanDecision
+print('  LlamaFirewall import chain: OK')
+" || fail "Import check failed."
+ok "Compatibility patch applied."
 
 # =============================================================================
-#  6. SYSTEMD SERVICE — LLAMAFIREWALL PROXY
+#  6. DEPLOY PROXY.PY
 # =============================================================================
+log "Deploying proxy.py..."
+if [[ -f "/home/${SERVICE_USER}/proxy.py" ]]; then
+    cp "/home/${SERVICE_USER}/proxy.py" "${INSTALL_DIR}/proxy.py"
+    ok "proxy.py deployed."
+else
+    fail "proxy.py not found in ~/. Run: scp proxy.py azureuser@<vm-fqdn>:~/"
+fi
 
-log "Creating systemd service for LlamaFirewall proxy (profile: ${PROFILE})..."
+# =============================================================================
+#  7. NOVA RULES
+# =============================================================================
+log "Setting up NOVA rules..."
+
+log "Cloning NOVA official rules..."
+git clone https://github.com/Nova-Hunting/nova-rules \
+    "${INSTALL_DIR}/nova-rules" 2>/dev/null \
+    || git -C "${INSTALL_DIR}/nova-rules" pull
+ok "Official NOVA rules cloned."
+
+mkdir -p "${INSTALL_DIR}/nova-rules-custom"
+
+if [[ -f "/home/${SERVICE_USER}/social_engineering_pt.nov" ]]; then
+    cp "/home/${SERVICE_USER}/social_engineering_pt.nov" \
+       "${INSTALL_DIR}/nova-rules-custom/"
+    ok "Custom NOVA rules deployed."
+else
+    warn "social_engineering_pt.nov not found — deploy manually:"
+    echo "  scp social_engineering_pt.nov ${SERVICE_USER}@<vm-fqdn>:/opt/llamafirewall/nova-rules-custom/"
+fi
+
+# =============================================================================
+#  8. HUGGINGFACE LOGIN + PROMPTGUARD 2 PRE-DOWNLOAD
+# =============================================================================
+log "HuggingFace login required for PromptGuard 2 model download."
+echo ""
+echo "  ► Accept the model licence first (if you haven't):"
+echo "    https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M"
+echo "  ► Get your token:"
+echo "    https://huggingface.co/settings/tokens"
+echo ""
+
+hf auth login
+
+HF_TOKEN=$(cat ~/.cache/huggingface/token 2>/dev/null || true)
+[[ -z "${HF_TOKEN}" ]] && fail "Could not read HuggingFace token after login."
+
+log "Pre-downloading PromptGuard 2 model (~170 MB)..."
+HF_HOME="${INSTALL_DIR}/.cache/huggingface" \
+HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}" \
+python3 -c "
+import os
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+model_id = 'meta-llama/Llama-Prompt-Guard-2-86M'
+token = os.environ['HUGGING_FACE_HUB_TOKEN']
+print('  Downloading tokenizer...')
+AutoTokenizer.from_pretrained(model_id, token=token)
+print('  Downloading model weights...')
+AutoModelForSequenceClassification.from_pretrained(model_id, token=token)
+print('  Done.')
+"
+ok "PromptGuard 2 cached at ${INSTALL_DIR}/.cache/huggingface"
+
+# =============================================================================
+#  9. SYSTEMD SERVICE
+# =============================================================================
+log "Creating llamafirewall.service (profile: ${PROFILE})..."
 
 sudo tee /etc/systemd/system/llamafirewall.service > /dev/null << SERVICE_EOF
 [Unit]
@@ -453,8 +315,6 @@ Environment="PATH=${INSTALL_DIR}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sb
 Environment="PYTHONUNBUFFERED=1"
 Environment="HF_HOME=${INSTALL_DIR}/.cache/huggingface"
 Environment="HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}"
-
-# --- Profile: ${PROFILE} ---
 Environment="LLAMAFIREWALL_PROFILE=${PROFILE}"
 Environment="PROMPTGUARD_THRESHOLD=${PG_THRESHOLD}"
 Environment="OUTPUT_SCAN_ENABLED=${OUTPUT_SCAN}"
@@ -480,91 +340,58 @@ SERVICE_EOF
 sudo systemctl daemon-reload
 sudo systemctl enable llamafirewall --quiet
 sudo systemctl start  llamafirewall
-
-ok "LlamaFirewall service started."
+ok "llamafirewall.service started."
 
 # =============================================================================
-#  7. HEALTH CHECKS
+#  10. HEALTH CHECKS
 # =============================================================================
+log "Health check — Ollama..."
+curl -sf http://localhost:${OLLAMA_PORT}/api/tags >/dev/null \
+    && ok "Ollama  → localhost:${OLLAMA_PORT} — UP" \
+    || fail "Ollama health check failed."
 
-log "Running health checks..."
-
-# --- Ollama ------------------------------------------------------------------
-log "Checking Ollama..."
-RETRIES=10
-until curl -sf http://localhost:${OLLAMA_PORT}/api/tags >/dev/null 2>&1; do
-  RETRIES=$((RETRIES - 1))
-  [[ $RETRIES -le 0 ]] && fail "Ollama health check failed."
-  sleep 3
-done
-ok "Ollama  → http://localhost:${OLLAMA_PORT} — UP"
-
-# --- LlamaFirewall proxy -----------------------------------------------------
-# First boot may take 30-60 s while PromptGuard 2 downloads its weights.
-log "Waiting for LlamaFirewall proxy (may download PromptGuard 2 weights ~170 MB)..."
+log "Health check — LlamaFirewall (loading PromptGuard 2 weights)..."
 RETRIES=40
 until curl -sf http://localhost:${FIREWALL_PORT}/health >/dev/null 2>&1; do
-  RETRIES=$((RETRIES - 1))
-  [[ $RETRIES -le 0 ]] && {
-    warn "LlamaFirewall did not start in time. Check logs with:"
-    echo "  journalctl -u llamafirewall -f"
-    fail "LlamaFirewall health check failed."
-  }
-  sleep 5
+    RETRIES=$((RETRIES-1))
+    [[ $RETRIES -le 0 ]] && {
+        warn "Check logs: journalctl -u llamafirewall -f"
+        fail "LlamaFirewall health check timeout."
+    }
+    sleep 5
 done
-ok "LlamaFirewall → http://localhost:${FIREWALL_PORT} — UP"
+ok "LlamaFirewall → localhost:${FIREWALL_PORT} — UP"
 
-# --- End-to-end test ---------------------------------------------------------
-log "Running end-to-end prompt test through the firewall..."
-E2E_RESPONSE=$(curl -sf \
-  -X POST http://localhost:${FIREWALL_PORT}/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "phi3:mini",
-    "messages": [{"role": "user", "content": "Reply with exactly two words: setup complete"}]
-  }' || true)
+log "End-to-end test..."
+E2E=$(curl -sf --max-time 120 \
+    -X POST http://localhost:${FIREWALL_PORT}/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"${OLLAMA_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 2 + 2?\"}]}" \
+    2>/dev/null || true)
 
-if echo "${E2E_RESPONSE}" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
-  REPLY=$(echo "${E2E_RESPONSE}" | jq -r '.choices[0].message.content')
-  ok "End-to-end test passed. Model replied: \"${REPLY}\""
+if echo "${E2E}" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+    REPLY=$(echo "${E2E}" | jq -r '.choices[0].message.content')
+    ok "End-to-end passed. Reply: \"${REPLY:0:60}\""
 else
-  warn "End-to-end test response was unexpected — may still be fine."
-  echo "  Raw response: ${E2E_RESPONSE}"
+    warn "End-to-end inconclusive — service running, model may still be loading."
 fi
 
-# =============================================================================
-#  8. SUMMARY
-# =============================================================================
-
-cat << SUMMARY_EOF
-
-${GREEN}============================================================
-  Setup complete!
+echo -e "${GREEN}
+============================================================
+  Setup complete! [Profile: ${PROFILE}]
 ============================================================${NC}
+  ollama.service        → localhost:${OLLAMA_PORT}
+  llamafirewall.service → localhost:${FIREWALL_PORT}
 
-  Services
-  ────────
-  ollama.service        → localhost:${OLLAMA_PORT}   (Ollama API)
-  llamafirewall.service → localhost:${FIREWALL_PORT}   (LlamaFirewall proxy)
+  LLM model    : ${OLLAMA_MODEL}
+  PG threshold : ${PG_THRESHOLD}
+  Output scan  : ${OUTPUT_SCAN}
 
-  Both services are enabled (start on boot) and running now.
+  Useful commands:
+    journalctl -u llamafirewall -f -o cat   # live security logs
+    sudo systemctl status llamafirewall     # service status
+    curl -sf http://localhost:${FIREWALL_PORT}/health  # check active scanners
 
-  Useful commands
-  ───────────────
-  # Follow LlamaFirewall security logs:
-  journalctl -u llamafirewall -f -o cat
-
-  # Check service status:
-  sudo systemctl status llamafirewall
-  sudo systemctl status ollama
-
-  # Restart the proxy after config changes:
-  sudo systemctl restart llamafirewall
-
-  From your laptop (SSH tunnel to PyRIT):
-  ────────────────────────────────────────
-  ssh -N -L 8080:localhost:8080 ${SERVICE_USER}@<your-vm-fqdn>
-
-  Then PyRIT connects to: http://localhost:8080/v1
-
-SUMMARY_EOF
+  From your laptop:
+    ssh -N -L 8080:localhost:8080 ${SERVICE_USER}@<vm-fqdn>
+"
