@@ -91,6 +91,9 @@ echo "  Output scanning  : ${OUTPUT_SCAN}"
 echo "  NOVA LLM tier    : ${NOVA_LLM}"
 echo ""
 
+# Initialised here — overwritten after HuggingFace login in section 6
+HF_TOKEN=""
+
 # =============================================================================
 #  1. SYSTEM PACKAGES
 # =============================================================================
