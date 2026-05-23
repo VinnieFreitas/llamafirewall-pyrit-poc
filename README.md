@@ -14,6 +14,13 @@ observable via Log Analytics and an Azure Workbook dashboard.
                                          Azure Workbook Dashboard
 ```
 
+**Stack:**
+- **Ollama** — local LLM inference server. Runs open-source models on CPU/GPU and exposes an OpenAI-compatible API on `localhost:11434`. Used in this PoC in place of Azure OpenAI — same API format, no per-token cost. In production, swap the target URL to point at your Azure OpenAI endpoint and the rest of the stack stays identical.
+- **LLM model** — `phi3:mini` (lab) / `mistral:7b` (preprod) / `llama3:8b` (production), managed by Ollama
+- **LlamaFirewall** — Meta's open-source LLM security framework, extended here with a 6-layer scanner stack
+- **PyRIT** — Microsoft's open-source AI red-teaming toolkit, runs adversarial prompts against the firewall
+- **Observability** — Azure Log Analytics → Azure Workbook dashboard
+
 **Firewall stack — 6 layers, runs in order on every prompt:**
 
 | Layer | Scanner | Type | Catches |
