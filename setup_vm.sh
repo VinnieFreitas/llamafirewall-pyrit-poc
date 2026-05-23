@@ -14,7 +14,7 @@
 #    8. Health checks
 #
 #  Usage (from your laptop):
-#    scp setup_vm.sh proxy.py azureuser@<vm-fqdn>:~/
+#    scp setup_vm.sh proxy.py social_engineering_pt.nov azureuser@<vm-fqdn>:~/
 #    ssh azureuser@<vm-fqdn> 'bash ~/setup_vm.sh 2>&1 | tee ~/setup.log'
 #
 #  Prerequisites:
@@ -117,6 +117,35 @@ pip install --upgrade pip --quiet
 
 log "Installing LlamaFirewall and dependencies (~2 GB for torch)..."
 pip install llamafirewall transformers torch fastapi uvicorn httpx --quiet
+
+ok "Python packages installed."
+
+# =============================================================================
+#  4b. LLAMA GUARD 3 + NOVA
+# =============================================================================
+
+log "Pulling LlamaGuard 3:8B via Ollama (~4.7 GB)..."
+ollama pull llama-guard3:8b
+ok "llama-guard3:8b ready."
+
+log "Installing NOVA prompt pattern matching engine..."
+pip install nova-hunting --quiet
+ok "nova-hunting installed."
+
+log "Cloning NOVA official rules..."
+git clone https://github.com/Nova-Hunting/nova-rules \
+    "${INSTALL_DIR}/nova-rules" 2>/dev/null \
+    || git -C "${INSTALL_DIR}/nova-rules" pull
+mkdir -p "${INSTALL_DIR}/nova-rules-custom"
+
+if [[ -f "/home/${SERVICE_USER}/social_engineering_pt.nov" ]]; then
+    cp "/home/${SERVICE_USER}/social_engineering_pt.nov" \
+       "${INSTALL_DIR}/nova-rules-custom/"
+    ok "Custom NOVA rules deployed."
+else
+    warn "social_engineering_pt.nov not found — deploy manually after setup:"
+    echo "  scp social_engineering_pt.nov ${SERVICE_USER}@<vm-fqdn>:/opt/llamafirewall/nova-rules-custom/"
+fi
 ok "Python packages installed."
 
 # =============================================================================
