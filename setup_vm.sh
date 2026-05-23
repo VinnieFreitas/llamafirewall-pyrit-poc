@@ -139,11 +139,14 @@ log "Pulling model: ${OLLAMA_MODEL} (this may take several minutes)..."
 ollama pull "${OLLAMA_MODEL}"
 ok "Model ${OLLAMA_MODEL} is ready."
 
-# Quick smoke-test
-log "Smoke-testing model..."
-RESPONSE=$(ollama run "${OLLAMA_MODEL}" "Reply with exactly: OK" --nowordwrap 2>/dev/null || true)
-if echo "${RESPONSE}" | grep -qi "ok"; then
-  ok "Model smoke-test passed."
+# Quick smoke-test via REST API (avoids the interactive-mode hang of 'ollama run')
+log "Smoke-testing Ollama REST API..."
+SMOKE=$(curl -sf --max-time 60 \
+    http://localhost:${OLLAMA_PORT}/api/generate \
+    -d "{\"model\":\"${OLLAMA_MODEL}\",\"prompt\":\"Reply with the single word OK.\",\"stream\":false}" \
+    2>/dev/null || true)
+if echo "${SMOKE}" | grep -qi "ok"; then
+  ok "Ollama smoke-test passed."
 else
   warn "Model responded but not with expected output. This is usually fine."
   echo "  Got: ${RESPONSE}"
