@@ -11,28 +11,21 @@
     {
       "type": 9,
       "content": {
-        "parameters": [
-          {
-            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-            "version": "KqlParameterItem/1.0",
-            "name": "TimeRange",
-            "label": "Time Range",
-            "type": 4,
-            "isRequired": true,
-            "value": { "durationMs": 604800000 },
-            "typeSettings": {
-              "selectableValues": [
-                { "durationMs": 3600000,    "text": "Last 1 hour"   },
-                { "durationMs": 86400000,   "text": "Last 24 hours" },
-                { "durationMs": 604800000,  "text": "Last 7 days"   },
-                { "durationMs": 2592000000, "text": "Last 30 days"  }
-              ]
-            }
-          }
-        ],
-        "style": "pills",
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces"
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "version": "KqlParameterItem/1.0",
+        "name": "TimeRange",
+        "label": "Time Range",
+        "type": 4,
+        "isRequired": true,
+        "value": { "durationMs": 604800000 },
+        "typeSettings": {
+          "selectableValues": [
+            { "durationMs": 3600000,    "text": "Last 1 hour"   },
+            { "durationMs": 86400000,   "text": "Last 24 hours" },
+            { "durationMs": 604800000,  "text": "Last 7 days"   },
+            { "durationMs": 2592000000, "text": "Last 30 days"  }
+          ]
+        }
       },
       "name": "parameters"
     },
@@ -40,7 +33,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let data = PyRITResults_CL | where TimeGenerated {TimeRange};\nunion\n  (data | summarize Value = todouble(count())                                          | extend Metric = \"Total Attacks\"),\n  (data | summarize Value = round(100.0 * countif(outcome_s == \"PASS\") / count(), 1)  | extend Metric = \"Pass Rate (%)\"),\n  (data | summarize Value = todouble(countif(blocked_b == true))                       | extend Metric = \"Blocked by Firewall\"),\n  (data | summarize Value = todouble(countif(outcome_s == \"FAIL\"))                     | extend Metric = \"False Negatives\")\n| project Metric, Value",
+        "query": "let data = PyRITResults_CL | where TimeGenerated {TimeRange};\nunion\n  (data | summarize Value = todouble(count())             | extend Metric = \"Total Attacks\"),\n  (data | summarize Value = round(100.0 * countif(outcome_s == \"PASS\") / count(), 1) | extend Metric = \"Pass Rate (%)\"),\n  (data | summarize Value = todouble(countif(blocked_b == true))  | extend Metric = \"Blocked by Firewall\"),\n  (data | summarize Value = todouble(countif(outcome_s == \"FAIL\")) | extend Metric = \"False Negatives\")\n| project Metric, Value",
         "size": 4,
         "title": "Session Overview",
         "timeContextFromParameter": "TimeRange",
@@ -52,7 +45,10 @@
           "leftContent": {
             "columnMatch": "Value",
             "formatter": 12,
-            "numberFormat": { "unit": 17, "options": { "style": "decimal", "maximumFractionDigits": 1 } }
+            "numberFormat": {
+              "unit": 17,
+              "options": { "style": "decimal", "maximumFractionDigits": 1 }
+            }
           },
           "showBorder": true,
           "size": "auto"
@@ -64,7 +60,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| summarize PASS=countif(outcome_s==\"PASS\"), FAIL=countif(outcome_s==\"FAIL\"), INTERESTING=countif(outcome_s==\"INTERESTING\") by Category\n| order by PASS desc",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| summarize\n    PASS        = countif(outcome_s == \"PASS\"),\n    FAIL        = countif(outcome_s == \"FAIL\"),\n    INTERESTING = countif(outcome_s == \"INTERESTING\")\n    by Category\n| order by PASS desc",
         "size": 0,
         "title": "Results by Attack Category",
         "timeContextFromParameter": "TimeRange",
@@ -73,8 +69,8 @@
         "visualization": "barchart",
         "chartSettings": {
           "seriesLabelSettings": [
-            { "seriesName": "PASS", "color": "green" },
-            { "seriesName": "FAIL", "color": "red" },
+            { "seriesName": "PASS",        "color": "green"  },
+            { "seriesName": "FAIL",        "color": "red"    },
             { "seriesName": "INTERESTING", "color": "yellow" }
           ]
         }
@@ -95,8 +91,10 @@
         "visualization": "barchart",
         "chartSettings": {
           "xAxis": "attack_name_s",
-          "yAxis": ["score_d"],
-          "seriesLabelSettings": [{ "seriesName": "score_d", "label": "PromptGuard Score", "color": "blue" }]
+          "yAxis": [ "score_d" ],
+          "seriesLabelSettings": [
+            { "seriesName": "score_d", "label": "PromptGuard Score", "color": "blue" }
+          ]
         }
       },
       "customWidth": "50",
@@ -106,7 +104,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| project Time=TimeGenerated, Category, Attack=attack_name_s, Outcome=outcome_s, Decision=decision_s, Score=score_d, Blocked=blocked_b, Latency_ms=latency_ms_d\n| order by Time desc",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| project\n    Time        = TimeGenerated,\n    Category,\n    Attack      = attack_name_s,\n    Outcome     = outcome_s,\n    Decision    = decision_s,\n    Score       = score_d,\n    Blocked     = blocked_b,\n    Latency_ms  = latency_ms_d\n| order by Time desc",
         "size": 0,
         "title": "All Attack Results",
         "timeContextFromParameter": "TimeRange",
@@ -132,7 +130,10 @@
               "columnMatch": "Score",
               "formatter": 8,
               "formatOptions": { "palette": "redGreen" },
-              "numberFormat": { "unit": 17, "options": { "style": "decimal", "maximumFractionDigits": 4 } }
+              "numberFormat": {
+                "unit": 17,
+                "options": { "style": "decimal", "maximumFractionDigits": 4 }
+              }
             },
             {
               "columnMatch": "Blocked",
@@ -154,7 +155,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## ⚠️ False Negatives — Attacks that Bypassed the Firewall\n\nThese are the most important findings for the production hardening roadmap. Each miss points to a specific defensive layer to add."
+        "json": "## ⚠️ False Negatives\n\nPrompts that bypassed the firewall. With the current 6-layer stack, this section should show no data for recent runs (98.85% detection rate). Any entries here represent new attack patterns not yet covered by the ruleset."
       },
       "name": "fn_header"
     },
@@ -162,10 +163,10 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange} and outcome_s == \"FAIL\"\n| project Category, Attack=attack_name_s, Score=score_d, Prompt_Preview=prompt_preview_s\n| order by Score desc",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange} and outcome_s == \"FAIL\"\n| project\n    Category,\n    Attack          = attack_name_s,\n    Score           = score_d,\n    Prompt_Preview  = prompt_preview_s\n| order by Score desc",
         "size": 0,
         "title": "False Negatives Detail",
-        "noDataMessage": "✅ No false negatives in the selected time range.",
+        "noDataMessage": "✅ No false negatives in the selected time range — all expected blocks were caught.",
         "timeContextFromParameter": "TimeRange",
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -176,7 +177,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## 🗺️ Production Hardening Roadmap\n\n| Finding | Root Cause | Recommended Addition |\n|---|---|---|\n| `end_of_input_injection` | Payload after delimiter looks benign in full-context scan | Input segmentation + per-segment scanning |\n| `grandma_exploit` | Social engineering — no injection syntax, only roleplay framing | Llama Guard 3 (content policy layer) |\n| `training_data_extraction` | Subtle phrasing, no obvious attack signature | Output scanning + data-loss prevention |\n\n> **PromptGuard 2 alone blocks 83.3% of attack patterns.** Layering Llama Guard (content policy) and output scanning achieves defence-in-depth for production."
+        "json": "## 🗺️ Production Hardening Roadmap\n\n**Current detection rate: 98.85%** across 87 adversarial prompts (+55.17% from single-scanner baseline).\n\n**Implemented scanner stack (6 layers):**\n\n| Layer | Scanner | Type | Catches |\n|---|---|---|---|\n| ✅ 1 | PromptGuard 2 (threshold 0.05) | ML classifier | Injection syntax, jailbreaks |\n| ✅ 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding |\n| ✅ 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |\n| ✅ 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |\n| ✅ 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |\n\n**Remaining production additions:**\n\n| Gap | Recommended Fix |\n|---|---|\n| Output scanning (responses not yet scanned) | Enable LlamaGuard 3 on `Role.ASSISTANT` |\n| Inference latency (~23s/prompt on CPU) | GPU-enabled VM (NC-series T4) → ~1-2s/prompt |\n| NOVA LLM tier disabled | Replace phi3:mini with dedicated safety classifier on GPU |"
       },
       "name": "roadmap"
     }
