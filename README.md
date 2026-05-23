@@ -1,36 +1,51 @@
-# LlamaFirewall + PyRIT — Azure Security PoC
+# LlamaFirewall + PyRIT — Azure AI Security PoC
 
-A personal lab proof-of-concept demonstrating a self-hosted LLM security pipeline on Azure:
+A self-hosted LLM security pipeline on Azure with automated red-team testing,
+observable via Log Analytics and an Azure Workbook dashboard.
 
 ```
-[ Linux Laptop ]                        [ Azure ~$10/month ]
+[ Linux Laptop ]                        [ Azure ]
   PyRIT ──── SSH tunnel ──────────────► LlamaFirewall proxy (:8080)
   log_shipper ────────────────────────►        │
-                                         Ollama + Phi-3-mini (:11434)
+                                         Ollama + LLM (:11434)
                                                │
                                          Log Analytics Workspace
                                                │
                                          Azure Workbook Dashboard
 ```
 
-**Stack:**
-- **LLM**: [Ollama](https://ollama.com) + [Phi-3-mini](https://ollama.com/library/phi3) (CPU-only, ~2.3 GB)
-- **Firewall**: [LlamaFirewall](https://github.com/meta-llama/LlamaFirewall) — 5-layer scanner stack (see below)
-- **Red-team**: [PyRIT](https://github.com/Azure/PyRIT) — 87 adversarial prompts across 10 attack categories
-- **Observability**: Azure Log Analytics → Azure Workbook
-
-**LlamaFirewall scanner stack (layered, runs in order):**
+**Firewall stack — 6 layers, runs in order on every prompt:**
 
 | Layer | Scanner | Type | Catches |
 |---|---|---|---|
-| 1 | PromptGuard 2 (threshold 0.05) | ML classifier | Injection syntax, jailbreaks |
+| 1 | PromptGuard 2 | ML classifier | Injection syntax, jailbreaks |
 | 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding tricks |
-| 3 | Regex (built-in) | Rule-based | Prompt injection patterns, PII |
-| 4 | CustomPatterns | Rule-based | XSS, SQL injection, credential extraction, tool abuse |
-| 5 | LlamaGuard 3:8B | Semantic LLM | Social engineering, subtle jailbreaks, content safety |
-| 6 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, system prompt extraction, bioweapon synthesis, political manipulation, capability fabrication |
+| 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |
+| 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |
+| 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |
+| 6 | Output scan *(preprod/prod)* | LlamaGuard 3:8B | Harmful content in LLM responses |
 
-**Achieved detection rate: 98.85% on 87-prompt adversarial dataset (+55.17% from baseline)**
+**Achieved: 98.85% detection on 87-prompt adversarial dataset (+55.17% from single-scanner baseline)**
+
+---
+
+## Environment Profiles
+
+The project supports three environment profiles, each with its own VM size,
+LLM model, scanner thresholds, and feature set.
+Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile.
+
+| Setting | lab | preprod | production |
+|---|---|---|---|
+| **VM size** | Standard_B8ms | Standard_D8s_v3 | Standard_D16s_v3 |
+| **vCPU / RAM** | 8 / 32 GB | 8 / 32 GB | 16 / 64 GB |
+| **LLM model** | phi3:mini | mistral:7b | llama3:8b |
+| **PromptGuard threshold** | 0.05 (aggressive) | 0.10 (balanced) | 0.15 (conservative) |
+| **Output scanning** | ❌ | ✅ | ✅ |
+| **NOVA LLM tier** | ❌ | ❌ | ✅ |
+| **LAW retention** | 30 days | 30 days | 90 days |
+| **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ |
+| **Est. cost (light use)** | ~$16/month | ~$28/month | ~$55/month |
 
 ---
 
@@ -40,36 +55,35 @@ All files live in the repo root — no subdirectories.
 
 ```
 .
-├── main.bicep              # Azure infrastructure (VM + Log Analytics Workspace)
-├── main.bicepparam         # Deployment parameters (fill in your SSH key)
-├── deploy.sh               # Step 1: deploys Azure infrastructure
+├── main.bicep              # Azure infrastructure — profile-aware VM + LAW
+├── main.bicepparam         # Parameters (SSH key, profile, region)
+├── deploy.sh               # Step 1: interactive profile selector → deploys infra
 ├── teardown.sh             # Step 1: destroys all Azure resources + cleans up local state
 │
-├── setup_vm.sh             # Step 2: full VM bootstrap (copy to VM and run)
-├── proxy.py                # Step 2: LlamaFirewall FastAPI proxy — 5-layer scanner stack
-├── test_tunnel.sh          # Step 2: laptop-side SSH tunnel + smoke test
+├── setup_vm.sh             # Step 2: VM bootstrap — accepts --profile lab|preprod|production
+├── proxy.py                # Step 2: LlamaFirewall FastAPI proxy — 6-layer scanner stack
+├── test_tunnel.sh          # Step 2: SSH tunnel + smoke test
 │
 ├── setup_pyrit.sh          # Step 3: creates local venv + installs PyRIT
-├── pyrit_redteam.py        # Step 3: red-team script (built-in + YAML prompt support)
-├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories)
+├── pyrit_redteam.py        # Step 3: red-team script (built-in + YAML support)
+├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories, PT-BR)
 ├── attack_prompts.yaml     # Step 3: extended built-in attack library (40 prompts)
-├── social_engineering_pt.nov  # Step 3: NOVA rules for semantic social engineering detection
+├── social_engineering_pt.nov  # Step 3: NOVA rules — social engineering, bioweapon, tool injection
 │
 ├── log_shipper.py          # Step 4: ships PyRIT results + live events to LAW
 │
 ├── workbook_content.json   # Step 5: Azure Workbook definition
-├── deploy_workbook.py      # Step 5: deploys workbook via Azure REST API
+├── deploy_workbook.py      # Step 5: deploys workbook (reuses same ID on redeploy)
 │
-├── run_demo.sh             # Demo: end-to-end automation (preflight → PyRIT → ship)
+├── run_demo.sh             # Demo: preflight → PyRIT → log ship — one command
 ├── toggle_nollm.sh         # Toggle Ollama bypass for fast PyRIT runs
 │
 ├── deploy-outputs.json     # Generated by deploy.sh — gitignored, keep locally
 └── README.md
 ```
 
-> `deploy-outputs.json` is excluded from git (see `.gitignore`) as it contains
-> your Log Analytics primary key. It is generated automatically by `deploy.sh`
-> and must be present in the repo root for `log_shipper.py` and `deploy_workbook.py` to work.
+> `deploy-outputs.json` is excluded from git (`.gitignore`) — it contains your
+> Log Analytics primary key. Generated automatically by `deploy.sh`.
 
 ---
 
@@ -78,113 +92,100 @@ All files live in the repo root — no subdirectories.
 - Azure subscription (personal is fine)
 - Azure CLI installed and logged in (`az login`)
 - Linux laptop with Python 3.10+, `ssh`, `jq`
-- HuggingFace account with access to both gated Meta models:
+- HuggingFace account with access to:
   - [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
-  - [meta-llama/Llama-Guard-3-8B](https://huggingface.co/meta-llama/Llama-Guard-3-8B) *(Llama Guard 3 is pulled via Ollama — no HF token needed for it)*
 - HuggingFace read token from https://huggingface.co/settings/tokens
+
+> LlamaGuard 3:8B is pulled via Ollama — no HuggingFace token needed for it.
 
 ---
 
 ## HuggingFace Setup — Do This Before Step 2
 
-PromptGuard 2 is a gated Meta model hosted on HuggingFace. "Gated" means you need a free account and must accept Meta's licence before the model can be downloaded. This is a one-time step.
+PromptGuard 2 is a gated Meta model. One-time setup:
 
-**1. Create a HuggingFace account**
+**1.** Create a free account at https://huggingface.co/join
 
-Go to https://huggingface.co/join and sign up for free.
+**2.** Accept the model licence at https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M
+— click **"Agree and access repository"** (instant approval)
 
-**2. Accept the model licence**
+**3.** Generate a read token at https://huggingface.co/settings/tokens
+→ **New token** → Role: **Read** → copy it
 
-Visit https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M and click **"Agree and access repository"**. Approval is instant — no waiting.
-
-**3. Generate a read token**
-
-Go to https://huggingface.co/settings/tokens → **New token** → Role: **Read** → give it a name (e.g. `llamapoc`) → **Generate token** → copy it somewhere safe.
-
-**4. Verify access from your laptop (optional but recommended)**
-
-```bash
-# Install the HuggingFace CLI if not present
-pip install huggingface_hub --quiet
-
-# Login
-hf auth login
-# Paste your token when prompted
-
-# Confirm you can see the model
-hf models ls --search "Llama-Prompt-Guard-2-86M"
-# Should return: meta-llama/Llama-Prompt-Guard-2-86M
-```
-
-> The `setup_vm.sh` script in Step 2 will prompt you for this token interactively during the VM setup. It stores it in the systemd service environment so the proxy can authenticate to HuggingFace on first model load — after that the weights are cached locally and no internet access is needed.
+> `setup_vm.sh` will prompt for this token interactively and inject it into
+> the systemd service. After first download the weights are cached locally.
 
 ---
 
 ## Step 1 — Deploy Azure Infrastructure
 
 ```bash
-cd ~/Documents/Safra_AI_Defense   # or wherever you cloned the repo
+cd ~/Documents/Safra_AI_Defense
 
 # 1. Generate SSH key (skip if you have one)
 ssh-keygen -t ed25519 -C "llamapoc"
 
-# 2. Edit main.bicepparam — paste your public key, choose a region
-cat ~/.ssh/id_ed25519.pub   # copy this into main.bicepparam
+# 2. Paste your public key into main.bicepparam
+cat ~/.ssh/id_ed25519.pub   # copy into adminPublicKey field
 
-# 3. Deploy (~3 minutes)
+# 3. Deploy — the script will prompt for environment profile
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-**What gets created:**
-- Standard_B8ms VM (8 vCPU, 32 GB RAM) — Ubuntu 22.04 LTS
-- Standard SSD 64 GB OS disk
-- VNet + NSG (SSH only, port 22)
+The profile selector appears after confirming the subscription:
+
+```
+1) lab         — Standard_B8ms  · phi3:mini   · ~$16/month
+2) preprod     — Standard_D8s_v3 · mistral:7b  · ~$28/month
+3) production  — Standard_D16s_v3 · llama3:8b  · ~$55/month
+```
+
+**What gets created (varies by profile):**
+- Ubuntu 22.04 LTS VM (size depends on profile)
+- VNet + NSG (SSH-only inbound)
 - Static public IP with DNS label
-- Log Analytics Workspace (PerGB2018, 30-day retention)
-- Auto-shutdown schedule (23:00 UTC daily)
-
-**Why B8ms?** Running PromptGuard 2 (~170 MB) + LlamaGuard 3:8B (~5 GB) + Phi-3-mini (~3.7 GB) simultaneously requires ~10 GB RAM comfortably. B8ms (32 GB) gives ample headroom.
-
-**Estimated cost:** ~$15–20/month if deallocated when not in use.
+- Log Analytics Workspace (30 or 90-day retention)
+- Auto-shutdown at 23:00 UTC (lab + preprod only)
 
 ---
 
 ## Step 2 — Set Up the VM
 
 ```bash
-# From the repo root:
+# Copy scripts to VM (all three required)
+scp setup_vm.sh proxy.py social_engineering_pt.nov \
+  azureuser@llamapoc-llama.eastus.cloudapp.azure.com:~/
 
-# Copy scripts to VM
-scp setup_vm.sh proxy.py azureuser@llamapoc-llama.eastus.cloudapp.azure.com:~/
-
-# Run setup (~15-20 min — model downloads are the slow parts)
+# Run setup — pass profile or let it prompt
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
-  'bash ~/setup_vm.sh 2>&1 | tee ~/setup.log'
+  'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
 ```
 
-The script will prompt you interactively for your HuggingFace token during the PromptGuard 2 model download.
+The script installs all components for the selected profile:
 
-After setup completes, pull LlamaGuard 3:8B via Ollama (~4.7 GB) and install NOVA:
+| Step | What happens |
+|---|---|
+| apt | System update + wait for apt-lock (Azure runs unattended-upgrades on boot) |
+| Ollama | Installs + pulls LLM model for the profile (phi3:mini / mistral:7b / llama3:8b) |
+| LlamaGuard3 | `ollama pull llama-guard3:8b` (~4.7 GB) |
+| Python | venv + llamafirewall + transformers + torch + nova-hunting |
+| HfFolder patch | Compatibility shim for huggingface_hub >= 0.25 |
+| HF login | Interactive prompt for your token + PromptGuard 2 download (~170 MB) |
+| proxy.py | Deployed with profile-specific environment variables |
+| NOVA | Official rules cloned + custom rules deployed |
+| systemd | `ollama.service` + `llamafirewall.service` enabled and started |
 
+**Expected runtime:** lab ~20 min · preprod ~35 min · production ~45 min
+
+**Validate from your laptop:**
 ```bash
-ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
-# Pull LlamaGuard 3
-ollama pull llama-guard3:8b
-
-# Install NOVA and clone official rules
-source /opt/llamafirewall/venv/bin/activate
-pip install nova-hunting --quiet
-git clone https://github.com/Nova-Hunting/nova-rules /opt/llamafirewall/nova-rules
-mkdir -p /opt/llamafirewall/nova-rules-custom
-EOF
-
-# Deploy custom NOVA rules
-scp social_engineering_pt.nov \
-  azureuser@llamapoc-llama.eastus.cloudapp.azure.com:/opt/llamafirewall/nova-rules-custom/
-sudo systemctl restart llamafirewall
+chmod +x test_tunnel.sh
+./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
-**Always warm up both models before running PyRIT** — after a VM restart, models are evicted from RAM and first requests will timeout. Warm them up first:
+Expected: `/health` shows 6 active scanners, clean prompt → ALLOW, injection → BLOCK.
+
+**Always warm up models before running PyRIT** — cold models cause timeouts:
 
 ```bash
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
@@ -195,20 +196,14 @@ curl -sf http://localhost:11434/api/generate \
 EOF
 ```
 
-**Known issues fixed in this script (documented for future reference):**
-1. **apt lock on first boot** — Azure runs `unattended-upgrades` in the background. The script waits up to 2 minutes, then force-clears the lock.
-2. **`ollama run` CLI hangs** — Smoke test uses the REST API (`/api/generate`) instead of `ollama run`, which blocks in non-interactive shells.
-3. **`huggingface_hub >= 0.25` breaks LlamaFirewall** — `HfFolder` was removed in v0.25. The script patches `promptguard_utils.py` with a compatibility shim.
-4. **LlamaFirewall `scanners` must be a dict** — The `LlamaFirewall` constructor takes `{Role: [ScannerType]}`, not a flat list.
-5. **Blocking scan in async handler** — `firewall.scan()` is synchronous. `proxy.py` wraps it with `asyncio.to_thread()` to avoid freezing uvicorn's event loop.
+> Replace `phi3:mini` with `mistral:7b` or `llama3:8b` for preprod/production profiles.
 
-**Validate from your laptop:**
-```bash
-chmod +x test_tunnel.sh
-./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
-```
-
-Expected output: clean prompt → ALLOW (score ~0.0003), DAN injection → BLOCK (score ~0.999).
+**Known issues fixed in this script:**
+1. **apt lock on first boot** — waits up to 2 min then force-clears
+2. **`ollama run` CLI hangs** — smoke test uses REST API instead
+3. **`huggingface_hub >= 0.25`** — `HfFolder` removed; script applies compatibility shim
+4. **LlamaFirewall `scanners` must be a dict** — `{Role: [ScannerType]}` not a list
+5. **Blocking scan in async handler** — `firewall.scan()` wrapped in `asyncio.to_thread()`
 
 ---
 
@@ -217,29 +212,24 @@ Expected output: clean prompt → ALLOW (score ~0.0003), DAN injection → BLOCK
 ```bash
 # From the repo root:
 
-# Install (one-time)
-# If you get python3-venv error: sudo apt install python3.X-venv -y
-# (replace X with your Python version — e.g. python3.12-venv)
+# Install (one-time — auto-installs python3.X-venv if missing)
 chmod +x setup_pyrit.sh && ./setup_pyrit.sh
 
-# Make sure models are warm and tunnel is open first
+# Open tunnel + warm models first
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 
-# Run the full custom attack dataset (87 prompts)
+# Run full 87-prompt dataset
 source venv/bin/activate
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml
-
-# Run the built-in 18-prompt set
-python3 pyrit_redteam.py
 
 # Run a single category
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml --category jailbreak
 
-# Dry run — just validates tunnel is reachable
+# Dry run — validates tunnel only
 python3 pyrit_redteam.py --dry-run
 ```
 
-**Attack categories in `custom_attacks.yaml` (87 prompts):**
+**Attack categories in `custom_attacks.yaml` (87 prompts, Brazilian Portuguese):**
 
 | Category | Count | Notes |
 |---|---|---|
@@ -254,7 +244,7 @@ python3 pyrit_redteam.py --dry-run
 | `tool_abuse` | 2 | Command injection, dangerous function calls |
 | `policy_compliance` | 1 | Regulatory bypass |
 
-**Achieved results across 6 improvement runs:**
+**Detection rate progression (lab profile):**
 
 | Run | Config | Pass rate |
 |---|---|---|
@@ -262,199 +252,148 @@ python3 pyrit_redteam.py --dry-run
 | 2 | PromptGuard 2 (threshold 0.05) | 60.92% |
 | 3 | + HiddenASCII + Regex + CustomPatterns | 72.41% |
 | 4 | + LlamaGuard 3:8B | 80.46% |
-| 5 | + dataset label fix + input truncation | 88.51% |
-| **6** | **+ fail-closed on timeout** | **90.80%** |
-| **7** | **+ NOVA (keyword + semantic rules)** | **98.85%** |
+| 5 | + dataset label fixes + input truncation | 88.51% |
+| 6 | + fail-closed on timeout | 90.80% |
+| **7** | **+ NOVA (keyword + semantic)** | **98.85%** |
 
 ---
 
-## NO_LLM Mode — Speed up PyRIT runs
+## NO_LLM Mode — Speed Up PyRIT Runs
 
-During red-team sessions you usually only care about LlamaFirewall's decision (BLOCK/ALLOW), not the actual LLM response. NO_LLM mode bypasses Ollama entirely for allowed prompts, cutting per-prompt latency from ~10-30s down to ~1-2s.
+Bypasses Ollama for allowed prompts — only the firewall scanner stack runs.
+Cuts per-prompt latency from ~23s down to ~7s.
 
 ```bash
-# Turn ON before a red-team run (fast mode)
-./toggle_nollm.sh on
-
-# Turn OFF when you need real LLM responses
-./toggle_nollm.sh off
-
-# Check current state
+./toggle_nollm.sh on    # enable (fast mode)
+./toggle_nollm.sh off   # disable (full LLM responses)
 ./toggle_nollm.sh status
 ```
-
-All three commands default to `azureuser@llamapoc-llama.eastus.cloudapp.azure.com`. Pass a different host as a second argument if needed:
-
-```bash
-./toggle_nollm.sh on azureuser@<other-vm-fqdn>
-```
-
----
 
 ---
 
 ## Step 4 — Ship Logs to Log Analytics
 
 ```bash
-# From the repo root (deploy-outputs.json must be present):
 source venv/bin/activate
 
-# Ship PyRIT results (one-shot after each red-team session)
+# One-shot after each PyRIT session
 python3 log_shipper.py --mode pyrit
 
-# Stream live firewall events during a test session
+# Stream live events during a test
 python3 log_shipper.py --mode live \
   --vm-host azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
-**LAW query to verify data landed:**
+**Verify data landed (KQL):**
 ```kusto
 PyRITResults_CL
 | order by TimeGenerated desc
 | project TimeGenerated, Category, attack_name_s, outcome_s, decision_s, score_d
 ```
 
-> Note: Log Analytics auto-types fields. `category` becomes `Category` (reserved word), `run_timestamp` becomes `run_timestamp_t` (datetime).
+> LAW auto-types fields: `category` → `Category`, `run_timestamp` → `run_timestamp_t`.
 
 ---
 
 ## Step 5 — Deploy Azure Workbook
 
 ```bash
-# From the repo root (deploy-outputs.json must be present):
 source venv/bin/activate
 python3 deploy_workbook.py
 ```
 
-Find the workbook at: **Azure Portal → Monitor → Workbooks → LlamaFirewall Security Dashboard**
+The workbook ID is persisted in `deploy-outputs.json` — re-running updates the
+existing workbook in-place rather than creating duplicates.
 
-**Dashboard sections:**
-1. Session Overview (KPI tiles: total attacks, pass rate, blocked, false negatives)
-2. Results by Attack Category (stacked bar)
-3. PromptGuard Score per Attack (bar chart)
-4. All Attack Results (colour-coded table)
-5. False Negatives + Production Hardening Roadmap
+**Azure Portal → Monitor → Workbooks → LlamaFirewall Security Dashboard**
 
 ---
 
 ## Cost Management
 
 ```bash
-# Deallocate VM when not testing (stops compute billing, keeps disk)
-az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm
+# Deallocate VM when done (stops compute billing, keeps disk)
+az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 
-# Start it again when needed (~60 seconds to boot, services start automatically)
+# Start again when needed
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
-
-# Auto-shutdown is configured at 23:00 UTC daily as a safety net
 ```
 
-**Monthly cost breakdown (light usage):**
+**Cost by profile (light usage ~20 hrs/month active):**
 
-| Resource | Cost |
-|---|---|
-| VM (B8ms, ~20 hrs active/month) | ~$8 |
-| Standard SSD 64 GB | ~$5 |
-| Log Analytics (< 1 GB) | Free tier |
-| Public IP | ~$3 |
-| **Total** | **~$16/month** |
+| Profile | VM | Storage | LAW | Total |
+|---|---|---|---|---|
+| lab | ~$8 (B8ms) | ~$5 | Free | **~$16/month** |
+| preprod | ~$15 (D8s_v3) | ~$8 | Free | **~$28/month** |
+| production | ~$32 (D16s_v3) | ~$15 | ~$5 | **~$55/month** |
 
----
-
-## Production Hardening Roadmap
-
-Current PoC achieves **90.8% detection** with a 5-layer scanner stack. Remaining 9.2% (8 prompts) are sophisticated semantic social engineering attacks in Portuguese.
-
-**Implemented in this PoC:**
-
-| Layer | Scanner | What it catches |
-|---|---|---|
-| ✅ | PromptGuard 2 (threshold 0.05) | Injection syntax, jailbreak patterns |
-| ✅ | HiddenASCII | BiDi text, invisible chars, encoding tricks |
-| ✅ | Regex + CustomPatterns | XSS, SQL injection, credential extraction, tool abuse |
-| ✅ | LlamaGuard 3:8B | Social engineering, subtle jailbreaks, content safety |
-| ✅ | NOVA (keyword+semantic) | Logic traps, tool injection, system prompt extraction, bioweapon synthesis, political manipulation |
-
-**Production additions (roadmap):**
-
-| Gap | Notes | Recommended fix |
-|---|---|---|
-| Output scanning | Not yet tested | Enable LlamaGuard 3 on `Role.ASSISTANT` |
-| GPU inference | CPU-only stack averages ~23s/prompt | NC-series VM (T4 GPU) → ~1-2s/prompt |
-| NOVA LLM tier | Disabled — phi3:mini caused false positives | Use a dedicated safety classifier for NOVA LLM evaluation |
+> Production has no auto-shutdown — remember to deallocate manually.
 
 ---
 
 ## Teardown — Ending a Test Session
 
-Run these steps in order at the end of every test session.
-
-**1. Stop the log shipper** (if running in live mode)
 ```bash
-# Ctrl+C in the terminal running log_shipper.py --mode live
-```
+# 1. Stop log shipper (if running)
+#    Ctrl+C in the terminal running log_shipper.py --mode live
 
-**2. Close the SSH tunnel**
-```bash
+# 2. Close SSH tunnel
 kill $(cat /tmp/llamapoc_tunnel.pid)
 
-# Confirm it's gone
-pgrep -a ssh | grep 8080   # should return nothing
+# 3. Deallocate VM  ← most important
+az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 ```
 
-**3. Deallocate the VM** (most important — this stops compute billing)
+> ⚠️ **Deallocate ≠ Shutdown.** `sudo shutdown` stops the OS but Azure keeps
+> billing for compute. Always use `az vm deallocate` or the portal **Stop** button.
+
+**Verify deallocated:**
 ```bash
-az vm deallocate \
-  --resource-group rg-llamapoc \
-  --name llamapoc-vm \
-  --no-wait   # returns immediately, runs in background
+az vm get-instance-view --resource-group rg-llamapoc --name llamapoc-vm \
+  --query "instanceView.statuses[1].displayStatus" -o tsv
+# Expected: VM deallocated
 ```
 
-> ⚠️ **Deallocate ≠ Shutdown.** Running `sudo shutdown` inside the VM stops the OS but Azure keeps billing for compute. Always use `az vm deallocate` from your laptop, or click **Stop** in the Azure portal (which deallocates automatically).
-
-**4. Verify the VM is deallocated**
+**Resuming:**
 ```bash
-az vm get-instance-view \
-  --resource-group rg-llamapoc \
-  --name llamapoc-vm \
-  --query "instanceView.statuses[1].displayStatus" \
-  -o tsv
-# Expected: "VM deallocated"
-```
-
-**Resuming the next day:**
-```bash
-# 1. Start the VM (~60 seconds)
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
-
-# 2. Both services start automatically — verify after ~60 seconds
-ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
-  'sudo systemctl status ollama llamafirewall --no-pager | grep -E "●|Active"'
-
-# 3. Re-open the tunnel
+# Wait ~60s, then open tunnel and warm models
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
-
-# 4. Warm up models before running PyRIT (critical — cold models cause timeouts)
-ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
-curl -sf http://localhost:11434/api/generate \
-  -d '{"model":"llama-guard3:8b","prompt":"hello","stream":false}' > /dev/null && echo "llama-guard3 warm"
-curl -sf http://localhost:11434/api/generate \
-  -d '{"model":"phi3:mini","prompt":"hello","stream":false}' > /dev/null && echo "phi3:mini warm"
-EOF
 ```
 
-**Full teardown (destroy everything):**
+**Full destroy (wipe everything):**
 ```bash
-# Deletes ALL resources in the group — VM, disk, LAW, workbooks, everything.
-# Only do this when the PoC is completely finished.
-az group delete --name rg-llamapoc --yes --no-wait
+./teardown.sh
 ```
+
+---
+
+## Production Hardening Roadmap
+
+**Implemented across all profiles:**
+
+| ✅ | Scanner | What it catches |
+|---|---|---|
+| ✅ | PromptGuard 2 | Injection syntax, jailbreak patterns |
+| ✅ | HiddenASCII | BiDi text, invisible chars, encoding tricks |
+| ✅ | Regex + CustomPatterns | XSS, SQL, credentials, tool abuse |
+| ✅ | LlamaGuard 3:8B | Social engineering, content safety |
+| ✅ | NOVA (keyword+semantic) | Logic traps, tool injection, bioweapon synthesis |
+| ✅ (preprod+prod) | Output scanning | Harmful content in LLM responses |
+
+**Remaining roadmap items:**
+
+| Gap | Notes | Fix |
+|---|---|---|
+| NOVA LLM tier | Disabled — phi3:mini caused false positives on benign prompts | Dedicated safety classifier on GPU |
+| GPU inference | CPU stack averages ~23s/prompt | NC-series T4 VM → ~1-2s/prompt |
+| Sentinel integration | LAW only for now | Enable Microsoft Sentinel on the workspace |
 
 ---
 
 ## Security Notes
 
-- `deploy-outputs.json` contains your Log Analytics primary key — **never commit this file**
-- The NSG allows SSH from any IP by default — restrict to your home IP in `main.bicep`
-- LlamaFirewall proxy listens on `127.0.0.1` only — only reachable via SSH tunnel
-- HuggingFace token is injected into the systemd service environment — not stored in any file
+- `deploy-outputs.json` contains your LAW primary key — **never commit this file**
+- NSG allows SSH from any IP by default — restrict `sourceAddressPrefix` in `main.bicep`
+- LlamaFirewall proxy binds to `127.0.0.1` only — only reachable via SSH tunnel
+- HuggingFace token is injected into systemd env — not stored in any config file
