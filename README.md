@@ -129,11 +129,21 @@ PromptGuard 2 is a gated Meta model. One-time setup:
 ```bash
 cd ~/Documents/Safra_AI_Defense
 
-# 1. Generate SSH key (skip if you have one)
+# 1. Generate SSH key — skip this if you already have one.
+#    Check first: ls ~/.ssh/id_ed25519.pub
+#    If the file exists, skip to step 2 and use that key.
+#    If not, generate one:
 ssh-keygen -t ed25519 -C "llamapoc"
 
-# 2. Paste your public key into main.bicepparam
-cat ~/.ssh/id_ed25519.pub   # copy into adminPublicKey field
+# 2. Copy your public key into main.bicepparam
+#    Open the file and replace the adminPublicKey value with the output below:
+cat ~/.ssh/id_ed25519.pub
+
+#    It should look like this in main.bicepparam:
+#    param adminPublicKey = 'ssh-ed25519 AAAAC3Nz... your-key-here'
+#
+#    ⚠️  Do this before running deploy.sh — the script checks for the
+#    placeholder value and will stop with an error if it hasn't been replaced.
 
 # 3. Deploy — the script will prompt for environment profile
 chmod +x deploy.sh && ./deploy.sh
