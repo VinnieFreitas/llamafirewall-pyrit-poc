@@ -405,7 +405,25 @@ BLOCK_THRESHOLD = float(os.environ.get("PROMPTGUARD_THRESHOLD", "0.05"))
 # lab: off  preprod: on  production: on
 OUTPUT_SCAN_ENABLED = os.environ.get("OUTPUT_SCAN_ENABLED", "0").strip() == "1"
 
-logger.info(f"Profile: {PROFILE} | PG threshold: {BLOCK_THRESHOLD} | Output scan: {OUTPUT_SCAN_ENABLED}")
+# ---------------------------------------------------------------------------
+#  BYPASS MODE
+#  When enabled, all scanning is skipped and prompts are forwarded directly
+#  to Ollama. The proxy stays running — no network changes needed.
+#  Use during production incidents where legitimate traffic is being dropped.
+#
+#  Enable:  sudo systemctl set-environment BYPASS_MODE=1
+#           sudo systemctl restart llamafirewall
+#  Disable: sudo systemctl unset-environment BYPASS_MODE
+#           sudo systemctl restart llamafirewall
+#
+#  Or use:  ./toggle_bypass.sh on|off|status azureuser@<vm-fqdn>
+# ---------------------------------------------------------------------------
+BYPASS_MODE = os.environ.get("BYPASS_MODE", "0").strip() == "1"
+
+if BYPASS_MODE:
+    logger.warning("⚠️  BYPASS MODE ENABLED — all scanning disabled, prompts forwarded directly to Ollama")
+else:
+    logger.info(f"Profile: {PROFILE} | PG threshold: {BLOCK_THRESHOLD} | Output scan: {OUTPUT_SCAN_ENABLED}")
 
 # ---------------------------------------------------------------------------
 #  NO_LLM mode
@@ -454,6 +472,46 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
+
+    # ------------------------------------------------------------------
+    #  BYPASS MODE — skip all scanning, forward directly to Ollama
+    # ------------------------------------------------------------------
+    if BYPASS_MODE:
+        logger.info("security_event", extra={
+            "event_type":    "llm_request",
+            "request_id":    request_id,
+            "blocked":       False,
+            "scan_decision": "BYPASS",
+            "scan_score":    0.0,
+            "bypass_mode":   True,
+            "prompt_length": len(str(messages)),
+        })
+        if NO_LLM:
+            return JSONResponse(content={
+                "id":      f"chatcmpl-{request_id}",
+                "object":  "chat.completion",
+                "model":   OLLAMA_MODEL,
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant",
+                    "content": "[BYPASS MODE + NO_LLM — scanning and LLM both disabled]",
+                }, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "x_llamafirewall": {"bypass_mode": True, "request_id": request_id},
+            })
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            bypass_resp = await client.post(
+                f"{OLLAMA_BASE_URL}/v1/chat/completions",
+                json={"model": body.get("model", OLLAMA_MODEL),
+                      "messages": messages, "stream": False},
+            )
+        if bypass_resp.status_code != 200:
+            raise HTTPException(status_code=bypass_resp.status_code,
+                                detail=f"Ollama error: {bypass_resp.text}")
+        bypass_body = bypass_resp.json()
+        bypass_body["x_llamafirewall"] = {
+            "bypass_mode": True, "request_id": request_id
+        }
+        return JSONResponse(content=bypass_body)
 
     # Extract the last user turn for scanning
     user_prompt = ""
@@ -607,5 +665,6 @@ async def health():
         "profile":       PROFILE,
         "pg_threshold":  BLOCK_THRESHOLD,
         "output_scan":   OUTPUT_SCAN_ENABLED,
-        "scanners":      active_scanners,
+        "bypass_mode":   BYPASS_MODE,
+        "scanners":      [] if BYPASS_MODE else active_scanners,
     }
