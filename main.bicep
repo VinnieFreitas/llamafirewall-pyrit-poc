@@ -1,20 +1,24 @@
 // =============================================================================
 //  LlamaFirewall / PyRIT — Infrastructure
-//  Resources: VNet, NSG, Public IP, NIC, Ubuntu VM, Log Analytics Workspace,
-//             Auto-shutdown schedule (disabled for production profile)
 //
 //  Profiles:
-//    lab        → B8ms  / 30-day LAW / auto-shutdown on  / phi3:mini
-//    preprod    → D8s_v3 / 30-day LAW / auto-shutdown on  / mistral:7b
-//    production → D16s_v3 / 90-day LAW / auto-shutdown off / llama3:8b
+//    lab        → single VM B8ms        / home use  / SSH tunnel from laptop
+//    preprod    → single VM D8s_v3      / home use  / SSH tunnel from laptop
+//    production → single VM D16s_v3     / home use  / SSH tunnel from laptop
+//    corp-lab   → two VMs (PyRIT B2ms + LlamaFirewall NC4as_T4_v3)
+//                 sandbox subscription  / BeyondTrust access / no SSH tunnel
+//
+//  ⚠️  corp-lab uses Standard_NC4as_T4_v3 (GPU).
+//      This VM size requires quota approval in your subscription before deploying.
+//      Request quota at: Portal → Subscriptions → Usage + quotas → Request increase
 // =============================================================================
 
 // ---------------------------------------------------------------------------
 //  Parameters
 // ---------------------------------------------------------------------------
 
-@description('Environment profile — drives VM size, LAW retention, and auto-shutdown.')
-@allowed(['lab', 'preprod', 'production'])
+@description('Environment profile.')
+@allowed(['lab', 'preprod', 'production', 'corp-lab'])
 param profile string = 'lab'
 
 @description('Short prefix applied to every resource name.')
@@ -22,60 +26,99 @@ param profile string = 'lab'
 @maxLength(10)
 param prefix string = 'llamapoc'
 
-@description('Azure region. brazilsouth for latency; eastus for lowest price.')
+@description('Azure region.')
 param location string = resourceGroup().location
 
-@description('Admin username for the VM.')
+@description('Admin username for both VMs.')
 param adminUsername string = 'azureuser'
 
-@description('SSH public key (contents of ~/.ssh/id_ed25519.pub or similar).')
+@description('SSH public key.')
 param adminPublicKey string
 
 @description('OS disk size in GB.')
 param osDiskSizeGB int = 64
 
-@description('Daily auto-shutdown time in UTC (HHmm). Only applies to lab and preprod profiles.')
+@description('Daily auto-shutdown time in UTC (HHmm). Applies to lab, preprod and corp-lab profiles.')
 param autoShutdownTime string = '2300'
+
+@description('''
+BeyondTrust source IP/CIDR for SSH access (corp-lab only).
+Set to your BeyondTrust jump server IP, e.g. "203.0.113.10/32".
+Defaults to * (any) — restrict before deploying to production sandbox.
+''')
+param beyondTrustSourceCIDR string = '*'
 
 // ---------------------------------------------------------------------------
 //  Profile configuration
-//  All environment-specific values derived from the profile parameter.
 // ---------------------------------------------------------------------------
 
 var profileConfig = {
   lab: {
-    vmSize:          'Standard_B8ms'      // 8 vCPU / 32 GB — burstable, cost-optimised
-    lawRetention:    30                   // minimum retention
-    autoShutdown:    true                 // deallocate nightly
-    diskType:        'StandardSSD_LRS'
-    description:     'Lab — burstable B-series, phi3:mini, aggressive scanning thresholds'
+    llamafirewallVMSize: 'Standard_B8ms'
+    pyritVMSize:         ''                  // no PyRIT VM — runs on laptop
+    lawRetention:        30
+    autoShutdown:        true
+    diskType:            'StandardSSD_LRS'
+    deployPyRITVM:       false
+    publicIP:            true                // needs public IP for SSH tunnel
+    description:         'Home Lab — B8ms, phi3:mini, SSH tunnel from laptop'
   }
   preprod: {
-    vmSize:          'Standard_D8s_v3'   // 8 vCPU / 32 GB — sustained CPU, non-burstable
-    lawRetention:    30
-    autoShutdown:    true
-    diskType:        'Premium_LRS'        // faster disk for mistral:7b model loads
-    description:     'Pre-Production — D-series sustained CPU, mistral:7b, balanced thresholds'
+    llamafirewallVMSize: 'Standard_D8s_v3'
+    pyritVMSize:         ''
+    lawRetention:        30
+    autoShutdown:        true
+    diskType:            'Premium_LRS'
+    deployPyRITVM:       false
+    publicIP:            true
+    description:         'Home Pre-prod — D8s_v3, mistral:7b, SSH tunnel from laptop'
   }
   production: {
-    vmSize:          'Standard_D16s_v3'  // 16 vCPU / 64 GB — room for all scanners + output scan
-    lawRetention:    90
-    autoShutdown:    false               // never auto-shutdown in production
-    diskType:        'Premium_LRS'
-    description:     'Production — D-series high CPU, llama3:8b, conservative thresholds'
+    llamafirewallVMSize: 'Standard_D16s_v3'
+    pyritVMSize:         ''
+    lawRetention:        90
+    autoShutdown:        false
+    diskType:            'Premium_LRS'
+    deployPyRITVM:       false
+    publicIP:            true
+    description:         'Home Production — D16s_v3, llama3:8b, SSH tunnel from laptop'
+  }
+  'corp-lab': {
+    llamafirewallVMSize: 'Standard_NC4as_T4_v3'  // GPU — requires quota approval
+    pyritVMSize:         'Standard_B2ms'
+    lawRetention:        30
+    autoShutdown:        true
+    diskType:            'Premium_LRS'
+    deployPyRITVM:       true                     // deploys a second VM for PyRIT
+    publicIP:            true                     // set false if BeyondTrust uses private routing
+    description:         'Corp Lab — NC4as T4 GPU + PyRIT VM, BeyondTrust access, sandbox VNet'
   }
 }
 
-var cfg        = profileConfig[profile]
-var vmName     = '${prefix}-vm'
+var cfg = profileConfig[profile]
+
+// Resource names — LlamaFirewall VM
+var lfVMName    = '${prefix}-lf-vm'
+var lfNICName   = '${prefix}-lf-nic'
+var lfPIPName   = '${prefix}-lf-pip'
+var lfDiskName  = '${prefix}-lf-osdisk'
+var lfDNSLabel  = '${prefix}-llama'
+
+// Resource names — PyRIT VM (corp-lab only)
+var pyritVMName   = '${prefix}-pyrit-vm'
+var pyritNICName  = '${prefix}-pyrit-nic'
+var pyritPIPName  = '${prefix}-pyrit-pip'
+var pyritDNSLabel = '${prefix}-pyrit'
+
+// Shared resources
 var lawName    = '${prefix}-law'
 var vnetName   = '${prefix}-vnet'
-var subnetName = 'default'
-var nsgName    = '${prefix}-nsg'
-var pipName    = '${prefix}-pip'
-var nicName    = '${prefix}-nic'
-var osDiskName = '${prefix}-osdisk'
-var dnsLabel   = '${prefix}-llama'
+var lfNSGName  = '${prefix}-lf-nsg'
+var pyritNSGName = '${prefix}-pyrit-nsg'
+
+// Subnets
+var lfSubnetName    = 'llamafirewall-subnet'
+var pyritSubnetName = 'pyrit-subnet'
 
 // ---------------------------------------------------------------------------
 //  Log Analytics Workspace
@@ -88,7 +131,7 @@ resource law 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
     sku: { name: 'PerGB2018' }
     retentionInDays: cfg.lawRetention
     features: {
-      disableLocalAuth:                          false
+      disableLocalAuth:                            false
       enableLogAccessUsingOnlyResourcePermissions: false
     }
     publicNetworkAccessForIngestion: 'Enabled'
@@ -97,11 +140,13 @@ resource law 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  NSG — SSH only inbound
+//  NSG — LlamaFirewall VM
+//  home profiles: SSH from any (restrict to home IP for better security)
+//  corp-lab:      SSH from BeyondTrust only + port 8080 from PyRIT subnet
 // ---------------------------------------------------------------------------
 
-resource nsg 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
-  name:     nsgName
+resource lfNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
+  name:     lfNSGName
   location: location
   properties: {
     securityRules: [
@@ -112,13 +157,73 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           protocol:                 'Tcp'
           access:                   'Allow'
           direction:                'Inbound'
-          // Restrict to your home IP for better security:
-          //   sourceAddressPrefix: '203.0.113.42/32'
-          sourceAddressPrefix:      '*'
+          sourceAddressPrefix:      profile == 'corp-lab' ? beyondTrustSourceCIDR : '*'
           sourcePortRange:          '*'
           destinationAddressPrefix: '*'
           destinationPortRange:     '22'
-          description: 'SSH for admin access and PyRIT tunnel'
+          description: profile == 'corp-lab'
+            ? 'SSH from BeyondTrust jump server only'
+            : 'SSH for admin access and PyRIT tunnel'
+        }
+      }
+      // corp-lab only: allow PyRIT VM to reach LlamaFirewall on port 8080
+      ...(profile == 'corp-lab' ? [
+        {
+          name: 'Allow-PyRIT-to-LlamaFirewall'
+          properties: {
+            priority:                 200
+            protocol:                 'Tcp'
+            access:                   'Allow'
+            direction:                'Inbound'
+            sourceAddressPrefix:      '10.0.1.0/24'   // PyRIT subnet
+            sourcePortRange:          '*'
+            destinationAddressPrefix: '*'
+            destinationPortRange:     '8080'
+            description:              'PyRIT VM → LlamaFirewall proxy (internal VNet only)'
+          }
+        }
+      ] : [])
+      {
+        name: 'Deny-All-Inbound'
+        properties: {
+          priority:                 4000
+          protocol:                 '*'
+          access:                   'Deny'
+          direction:                'Inbound'
+          sourceAddressPrefix:      '*'
+          sourcePortRange:          '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange:     '*'
+          description:              'Explicit deny-all'
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  NSG — PyRIT VM (corp-lab only)
+//  SSH from BeyondTrust only. Outbound to LlamaFirewall on 8080 is handled
+//  by the LlamaFirewall NSG allow rule above.
+// ---------------------------------------------------------------------------
+
+resource pyritNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = if (cfg.deployPyRITVM) {
+  name:     pyritNSGName
+  location: location
+  properties: {
+    securityRules: [
+      {
+        name: 'Allow-SSH-BeyondTrust'
+        properties: {
+          priority:                 100
+          protocol:                 'Tcp'
+          access:                   'Allow'
+          direction:                'Inbound'
+          sourceAddressPrefix:      beyondTrustSourceCIDR
+          sourcePortRange:          '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange:     '22'
+          description:              'SSH from BeyondTrust jump server only'
         }
       }
       {
@@ -132,7 +237,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           sourcePortRange:          '*'
           destinationAddressPrefix: '*'
           destinationPortRange:     '*'
-          description: 'Explicit deny-all'
+          description:              'Explicit deny-all'
         }
       }
     ]
@@ -140,7 +245,9 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  VNet + Subnet
+//  VNet + Subnets
+//  home profiles: single subnet (default)
+//  corp-lab:      two subnets — one per VM
 // ---------------------------------------------------------------------------
 
 resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
@@ -148,12 +255,27 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
   location: location
   properties: {
     addressSpace: { addressPrefixes: ['10.0.0.0/16'] }
-    subnets: [
+    subnets: profile == 'corp-lab' ? [
       {
-        name: subnetName
+        name: lfSubnetName
         properties: {
           addressPrefix:          '10.0.0.0/24'
-          networkSecurityGroup: { id: nsg.id }
+          networkSecurityGroup: { id: lfNSG.id }
+        }
+      }
+      {
+        name: pyritSubnetName
+        properties: {
+          addressPrefix:          '10.0.1.0/24'
+          networkSecurityGroup: { id: pyritNSG.id }
+        }
+      }
+    ] : [
+      {
+        name: 'default'
+        properties: {
+          addressPrefix:          '10.0.0.0/24'
+          networkSecurityGroup: { id: lfNSG.id }
         }
       }
     ]
@@ -161,33 +283,66 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  Public IP
+//  Public IPs
 // ---------------------------------------------------------------------------
 
-resource pip 'Microsoft.Network/publicIPAddresses@2023-04-01' = {
-  name:     pipName
+resource lfPIP 'Microsoft.Network/publicIPAddresses@2023-04-01' = if (cfg.publicIP) {
+  name:     lfPIPName
   location: location
   sku: { name: 'Standard' }
   properties: {
     publicIPAllocationMethod: 'Static'
-    dnsSettings: { domainNameLabel: dnsLabel }
+    dnsSettings: { domainNameLabel: lfDNSLabel }
+  }
+}
+
+resource pyritPIP 'Microsoft.Network/publicIPAddresses@2023-04-01' = if (cfg.deployPyRITVM && cfg.publicIP) {
+  name:     pyritPIPName
+  location: location
+  sku: { name: 'Standard' }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    dnsSettings: { domainNameLabel: pyritDNSLabel }
   }
 }
 
 // ---------------------------------------------------------------------------
-//  NIC
+//  NICs
 // ---------------------------------------------------------------------------
 
-resource nic 'Microsoft.Network/networkInterfaces@2023-04-01' = {
-  name:     nicName
+resource lfNIC 'Microsoft.Network/networkInterfaces@2023-04-01' = {
+  name:     lfNICName
   location: location
   properties: {
     ipConfigurations: [
       {
         name: 'ipconfig1'
         properties: {
-          subnet:                    { id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, subnetName) }
-          publicIPAddress:           { id: pip.id }
+          subnet: {
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName,
+              profile == 'corp-lab' ? lfSubnetName : 'default')
+          }
+          publicIPAddress: cfg.publicIP ? { id: lfPIP.id } : null
+          privateIPAllocationMethod: 'Dynamic'
+        }
+      }
+    ]
+  }
+  dependsOn: [vnet]
+}
+
+resource pyritNIC 'Microsoft.Network/networkInterfaces@2023-04-01' = if (cfg.deployPyRITVM) {
+  name:     pyritNICName
+  location: location
+  properties: {
+    ipConfigurations: [
+      {
+        name: 'ipconfig1'
+        properties: {
+          subnet: {
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnetName, pyritSubnetName)
+          }
+          publicIPAddress: cfg.publicIP ? { id: pyritPIP.id } : null
           privateIPAllocationMethod: 'Dynamic'
         }
       }
@@ -197,16 +352,16 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  Virtual Machine
+//  LlamaFirewall VM
 // ---------------------------------------------------------------------------
 
-resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
-  name:     vmName
+resource lfVM 'Microsoft.Compute/virtualMachines@2023-09-01' = {
+  name:     lfVMName
   location: location
   properties: {
-    hardwareProfile: { vmSize: cfg.vmSize }
+    hardwareProfile: { vmSize: cfg.llamafirewallVMSize }
     osProfile: {
-      computerName:  vmName
+      computerName:  lfVMName
       adminUsername: adminUsername
       linuxConfiguration: {
         disablePasswordAuthentication: true
@@ -232,7 +387,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
         version:   'latest'
       }
       osDisk: {
-        name:         osDiskName
+        name:         lfDiskName
         createOption: 'FromImage'
         managedDisk:  { storageAccountType: cfg.diskType }
         diskSizeGB:   osDiskSizeGB
@@ -242,7 +397,78 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
     networkProfile: {
       networkInterfaces: [
         {
-          id: nic.id
+          id: lfNIC.id
+          properties: { deleteOption: 'Delete' }
+        }
+      ]
+    }
+    diagnosticsProfile: {
+      bootDiagnostics: { enabled: false }
+    }
+  }
+}
+
+// NVIDIA GPU driver extension — corp-lab only (NC-series requires manual driver install on Ubuntu)
+resource nvidiaExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09-01' = if (profile == 'corp-lab') {
+  name:     'NvidiaGpuDriverLinux'
+  parent:   lfVM
+  location: location
+  properties: {
+    publisher:               'Microsoft.HpcCompute'
+    type:                    'NvidiaGpuDriverLinux'
+    typeHandlerVersion:      '1.9'
+    autoUpgradeMinorVersion: true
+    settings: {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  PyRIT VM (corp-lab only)
+// ---------------------------------------------------------------------------
+
+resource pyritVM 'Microsoft.Compute/virtualMachines@2023-09-01' = if (cfg.deployPyRITVM) {
+  name:     pyritVMName
+  location: location
+  properties: {
+    hardwareProfile: { vmSize: cfg.pyritVMSize }
+    osProfile: {
+      computerName:  pyritVMName
+      adminUsername: adminUsername
+      linuxConfiguration: {
+        disablePasswordAuthentication: true
+        ssh: {
+          publicKeys: [
+            {
+              path:    '/home/${adminUsername}/.ssh/authorized_keys'
+              keyData: adminPublicKey
+            }
+          ]
+        }
+        patchSettings: {
+          patchMode:      'AutomaticByPlatform'
+          assessmentMode: 'AutomaticByPlatform'
+        }
+      }
+    }
+    storageProfile: {
+      imageReference: {
+        publisher: 'Canonical'
+        offer:     '0001-com-ubuntu-server-jammy'
+        sku:       '22_04-lts-gen2'
+        version:   'latest'
+      }
+      osDisk: {
+        name:         '${prefix}-pyrit-osdisk'
+        createOption: 'FromImage'
+        managedDisk:  { storageAccountType: 'StandardSSD_LRS' }
+        diskSizeGB:   32
+        deleteOption: 'Delete'
+      }
+    }
+    networkProfile: {
+      networkInterfaces: [
+        {
+          id: pyritNIC.id
           properties: { deleteOption: 'Delete' }
         }
       ]
@@ -254,18 +480,31 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  Auto-Shutdown — only for lab and preprod profiles
+//  Auto-Shutdown
 // ---------------------------------------------------------------------------
 
-resource autoShutdown 'Microsoft.DevTestLab/schedules@2018-09-15' = if (cfg.autoShutdown) {
-  name:     'shutdown-computevm-${vmName}'
+resource lfAutoShutdown 'Microsoft.DevTestLab/schedules@2018-09-15' = if (cfg.autoShutdown) {
+  name:     'shutdown-computevm-${lfVMName}'
   location: location
   properties: {
-    status:   'Enabled'
-    taskType: 'ComputeVmShutdownTask'
-    dailyRecurrence: { time: autoShutdownTime }
-    timeZoneId: 'UTC'
-    targetResourceId: vm.id
+    status:                  'Enabled'
+    taskType:                'ComputeVmShutdownTask'
+    dailyRecurrence:         { time: autoShutdownTime }
+    timeZoneId:              'UTC'
+    targetResourceId:        lfVM.id
+    notificationSettings:    { status: 'Disabled' }
+  }
+}
+
+resource pyritAutoShutdown 'Microsoft.DevTestLab/schedules@2018-09-15' = if (cfg.autoShutdown && cfg.deployPyRITVM) {
+  name:     'shutdown-computevm-${pyritVMName}'
+  location: location
+  properties: {
+    status:               'Enabled'
+    taskType:             'ComputeVmShutdownTask'
+    dailyRecurrence:      { time: autoShutdownTime }
+    timeZoneId:           'UTC'
+    targetResourceId:     pyritVM.id
     notificationSettings: { status: 'Disabled' }
   }
 }
@@ -280,20 +519,32 @@ output activeProfile string = profile
 @description('Profile description.')
 output profileDescription string = cfg.description
 
-@description('VM size used.')
-output vmSizeUsed string = cfg.vmSize
+@description('LlamaFirewall VM size.')
+output vmSizeUsed string = cfg.llamafirewallVMSize
 
-@description('VM public IP address.')
-output vmPublicIP string = pip.properties.ipAddress
+@description('LlamaFirewall VM public IP.')
+output vmPublicIP string = cfg.publicIP ? lfPIP.properties.ipAddress : 'no-public-ip'
 
-@description('VM FQDN.')
-output vmFQDN string = pip.properties.dnsSettings.fqdn
+@description('LlamaFirewall VM FQDN.')
+output vmFQDN string = cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'
 
-@description('SSH command.')
-output sshCommand string = 'ssh ${adminUsername}@${pip.properties.dnsSettings.fqdn}'
+@description('SSH connect command — LlamaFirewall VM.')
+output sshCommand string = 'ssh ${adminUsername}@${cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'}'
 
-@description('SSH tunnel command.')
-output sshTunnelCommand string = 'ssh -N -L 8080:localhost:8080 ${adminUsername}@${pip.properties.dnsSettings.fqdn}'
+@description('SSH tunnel command (home profiles only).')
+output sshTunnelCommand string = 'ssh -N -L 8080:localhost:8080 ${adminUsername}@${cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'}'
+
+@description('PyRIT VM public IP (corp-lab only).')
+output pyritVMPublicIP string = (cfg.deployPyRITVM && cfg.publicIP) ? pyritPIP.properties.ipAddress : 'n/a'
+
+@description('PyRIT VM FQDN (corp-lab only).')
+output pyritVMFQDN string = (cfg.deployPyRITVM && cfg.publicIP) ? pyritPIP.properties.dnsSettings.fqdn : 'n/a'
+
+@description('SSH connect command — PyRIT VM (corp-lab only).')
+output pyritSSHCommand string = (cfg.deployPyRITVM && cfg.publicIP) ? 'ssh ${adminUsername}@${pyritPIP.properties.dnsSettings.fqdn}' : 'n/a'
+
+@description('LlamaFirewall VM private IP — use this from the PyRIT VM (corp-lab).')
+output llamafirewallPrivateIP string = lfNIC.properties.ipConfigurations[0].properties.privateIPAddress
 
 @description('Log Analytics Workspace ID.')
 output lawWorkspaceId string = law.properties.customerId

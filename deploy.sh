@@ -65,17 +65,71 @@ echo "  3) production  — Standard_D16s_v3 (16 vCPU / 64 GB)"
 echo "                   llama3:8b · 90-day LAW · no auto-shutdown"
 echo "                   ~\$55/month (always on)"
 echo ""
-read -rp "Enter profile [1/2/3] (default: 1): " PROFILE_CHOICE
+echo "  4) corp-lab    — NC4as_T4_v3 GPU + B2ms PyRIT VM"
+echo "                   Two VMs · BeyondTrust access · sandbox VNet"
+echo "                   ~\$45/month (light usage)"
+echo "                   ⚠️  Requires NC-series quota in sandbox subscription"
+echo ""
+read -rp "Enter profile [1/2/3/4] (default: 1): " PROFILE_CHOICE
 
 case "${PROFILE_CHOICE}" in
   2) PROFILE="preprod"    ;;
   3) PROFILE="production" ;;
+  4) PROFILE="corp-lab"   ;;
   *) PROFILE="lab"        ;;
 esac
 
 echo ""
 echo "==> Selected profile: ${PROFILE}"
 echo ""
+
+# ---------------------------------------------------------------------------
+#  SSH KEY — corp-lab generates a dedicated key pair
+#  Never reuse your personal home-lab key in a corporate environment.
+# ---------------------------------------------------------------------------
+
+if [[ "${PROFILE}" == "corp-lab" ]]; then
+    CORP_KEY="${HOME}/.ssh/id_ed25519_llamapoc_corp"
+    echo "============================================================"
+    echo "  Corp-lab SSH key setup"
+    echo "============================================================"
+    echo ""
+    if [[ -f "${CORP_KEY}" ]]; then
+        echo "  Found existing corp key: ${CORP_KEY}"
+        read -rp "  Use existing key? [Y/n] " USE_EXISTING
+        if [[ "${USE_EXISTING,,}" == "n" ]]; then
+            echo "  Generating new corp key..."
+            ssh-keygen -t ed25519 -C "llamapoc-corp-lab" -f "${CORP_KEY}" -N ""
+            ok "New corp SSH key generated at ${CORP_KEY}"
+        else
+            ok "Using existing corp key."
+        fi
+    else
+        echo "  No corp key found — generating a dedicated key pair."
+        echo "  ⚠️  Do NOT reuse your personal key in a corporate environment."
+        echo ""
+        ssh-keygen -t ed25519 -C "llamapoc-corp-lab" -f "${CORP_KEY}" -N ""
+        ok "Corp SSH key generated at ${CORP_KEY}"
+    fi
+
+    CORP_PUBLIC_KEY=$(cat "${CORP_KEY}.pub")
+    echo ""
+    echo "  Public key: ${CORP_PUBLIC_KEY}"
+    echo ""
+
+    # Inject the corp key into main.bicepparam
+    sed -i "s|param adminPublicKey = '.*'|param adminPublicKey = '${CORP_PUBLIC_KEY}'|" \
+        "${SCRIPT_DIR}/main.bicepparam"
+    ok "Corp public key injected into main.bicepparam."
+
+    echo ""
+    warn "Keep ${CORP_KEY} safe — this is the only way to SSH into your corp VMs."
+    warn "Add to your SSH config for convenience:"
+    echo "    Host llamapoc-corp-*"
+    echo "      IdentityFile ${CORP_KEY}"
+    echo "      User azureuser"
+    echo ""
+fi
 
 # Update main.bicepparam with the selected profile
 sed -i "s/^param profile = .*/param profile = '${PROFILE}'/" "${SCRIPT_DIR}/main.bicepparam"
@@ -148,6 +202,20 @@ echo "  VM Public IP   : ${VM_IP}"
 echo "  VM FQDN        : ${VM_FQDN}"
 echo ""
 echo "  SSH connect    : ${SSH_CMD}"
+
+# corp-lab: also print PyRIT VM details
+PYRIT_IP=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pyritVMPublicIP',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")
+PYRIT_SSH=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pyritSSHCommand',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")
+LF_PRIVATE=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('llamafirewallPrivateIP',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")
+
+if [[ "${PYRIT_IP}" != "n/a" && "${PYRIT_IP}" != "" ]]; then
+    echo ""
+    echo "  --- PyRIT VM (corp-lab) ---"
+    echo "  PyRIT VM IP    : ${PYRIT_IP}"
+    echo "  PyRIT SSH      : ${PYRIT_SSH}"
+    echo "  LF Private IP  : ${LF_PRIVATE}"
+    echo "  (PyRIT connects to LlamaFirewall at: http://${LF_PRIVATE}:8080/v1)"
+fi
 echo "  SSH tunnel     : ${TUNNEL}"
 echo ""
 echo "  LAW Workspace  : ${LAW_ID}"
