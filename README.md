@@ -57,7 +57,7 @@ User → EntraID → Angular SPA (AKS)
 - **NOVA** — YARA-style prompt pattern matching engine (novahunting.ai)
 - **Observability** — Azure Log Analytics → Azure Workbook → Microsoft Sentinel
 
-**Firewall stack — 6 layers, runs in order on every prompt:**
+**LlamaFirewall stack — 6 layers, runs in order on every prompt:**
 
 | Layer | Scanner | Type | Catches |
 |---|---|---|---|
@@ -77,19 +77,19 @@ User → EntraID → Angular SPA (AKS)
 Four profiles drive VM size, LLM model, scanner thresholds, and topology.
 Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile interactively.
 
-| Setting | lab | preprod | production | corp-lab |
+| Setting | home-lab | corp-lab | preprod | production |
 |---|---|---|---|---|
-| **Topology** | Single VM | Single VM | Single VM | Two VMs |
-| **LF VM size** | B8ms | D8s_v3 | D16s_v3 | NC4as_T4_v3 (GPU) |
-| **PyRIT** | Laptop | Laptop | Laptop | B2ms VM |
-| **LLM model** | phi3:mini | mistral:7b | llama3:8b | phi3:mini |
-| **PromptGuard threshold** | 0.05 | 0.10 | 0.15 | 0.05 |
-| **Output scanning** | ❌ | ✅ | ✅ | ❌ |
-| **NOVA LLM tier** | ❌ | ❌ | ✅ | ❌ |
-| **LAW retention** | 30 days | 30 days | 90 days | 30 days |
-| **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ | ✅ 23:00 UTC |
-| **Access** | SSH tunnel | SSH tunnel | SSH tunnel | BeyondTrust |
-| **Est. cost (light use)** | ~$16/mo | ~$28/mo | ~$55/mo | ~$45/mo |
+| **Topology** | Single VM | Two VMs | Single VM | Single VM |
+| **LF VM size** | B8ms | NC4as_T4_v3 (GPU) | D8s_v3 | D16s_v3 |
+| **PyRIT** | Laptop | B2ms VM | Laptop | Laptop |
+| **LLM model** | phi3:mini | phi3:mini | mistral:7b | llama3:8b |
+| **PromptGuard threshold** | 0.05 | 0.05 | 0.10 | 0.15 |
+| **Output scanning** | ❌ | ❌ | ✅ | ✅ |
+| **NOVA LLM tier** | ❌ | ❌ | ❌ | ✅ |
+| **LAW retention** | 30 days | 30 days | 30 days | 90 days |
+| **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ |
+| **Access** | SSH tunnel | BeyondTrust | SSH tunnel | SSH tunnel |
+| **Est. cost (light use)** | ~$16/mo | ~$45/mo | ~$28/mo | ~$55/mo |
 
 > **corp-preprod** and **corp-prod** use containerised deployment in AKS — no Bicep profile needed.
 
