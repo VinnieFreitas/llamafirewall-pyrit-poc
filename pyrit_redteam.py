@@ -1,18 +1,20 @@
 """
 =============================================================================
  LlamaFirewall / PyRIT PoC — Red-Team Script (Step 3)
- 
+
  Runs a structured set of adversarial attacks against the LlamaFirewall
- proxy (via SSH tunnel on localhost:8080) and produces:
+ proxy and produces:
    - Console output with per-prompt results
    - results/redteam_results.json   — full detail, for the log shipper
    - results/redteam_summary.txt    — human-readable summary for the report
- 
+
  Usage:
    source venv/bin/activate
-   python3 pyrit_redteam.py                    # full run
-   python3 pyrit_redteam.py --category inject  # single category
-   python3 pyrit_redteam.py --dry-run          # validate tunnel only
+   python3 pyrit_redteam.py                         # home-lab (localhost tunnel)
+   python3 pyrit_redteam.py --endpoint http://10.0.0.4:8080/v1  # corp-lab (private IP)
+   python3 pyrit_redteam.py --category jailbreak    # single category
+   python3 pyrit_redteam.py --prompts-file custom_attacks.yaml   # custom YAML
+   python3 pyrit_redteam.py --dry-run               # validate endpoint only
 =============================================================================
 """
 
@@ -35,9 +37,15 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 #  Config
+#  FIREWALL_ENDPOINT can be overridden via --endpoint flag or
+#  LLAMAFIREWALL_ENDPOINT environment variable.
+#  home-lab: http://localhost:8080/v1      (SSH tunnel)
+#  corp-lab: http://10.0.0.4:8080/v1      (private VNet IP)
 # ---------------------------------------------------------------------------
 
-FIREWALL_ENDPOINT = "http://localhost:8080/v1"
+FIREWALL_ENDPOINT = os.environ.get(
+    "LLAMAFIREWALL_ENDPOINT", "http://localhost:8080/v1"
+)
 MODEL             = "phi3:mini"
 RESULTS_DIR       = Path("results")
 REQUEST_DELAY_S   = 2.0   # Pause between prompts — be kind to the B4ms
@@ -275,7 +283,12 @@ def coloured(text: str, outcome: str) -> str:
 # ---------------------------------------------------------------------------
 
 def run(categories: Optional[list] = None, dry_run: bool = False,
-        prompt_overrides: Optional[list] = None):
+        prompt_overrides: Optional[list] = None,
+        endpoint: Optional[str] = None):
+
+    global FIREWALL_ENDPOINT
+    if endpoint:
+        FIREWALL_ENDPOINT = endpoint
     RESULTS_DIR.mkdir(exist_ok=True)
 
     prompts = prompt_overrides if prompt_overrides is not None else ATTACK_PROMPTS
@@ -392,7 +405,7 @@ def run(categories: Optional[list] = None, dry_run: bool = False,
     summary_lines = [
         "LlamaFirewall / PyRIT PoC — Red-Team Summary",
         f"Run time : {run_meta['run_timestamp']}",
-        f"Target   : {FIREWALL_ENDPOINT}  (via SSH tunnel → Azure VM)",
+        f"Target   : {FIREWALL_ENDPOINT}",
         f"Model    : {MODEL}",
         "",
         f"Total prompts : {total}",
@@ -426,13 +439,23 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 pyrit_redteam.py                              # built-in prompts, all categories
-  python3 pyrit_redteam.py --category jailbreak         # built-in, one category
+  python3 pyrit_redteam.py                              # home-lab (localhost SSH tunnel)
+  python3 pyrit_redteam.py --endpoint http://10.0.0.4:8080/v1  # corp-lab (private IP)
+  python3 pyrit_redteam.py --category jailbreak         # single category
   python3 pyrit_redteam.py --prompts-file attack_prompts.yaml          # custom YAML
   python3 pyrit_redteam.py --prompts-file attack_prompts.yaml \\
                            --category domain_financial  # custom YAML, one category
-  python3 pyrit_redteam.py --dry-run                    # tunnel check only
+  python3 pyrit_redteam.py --dry-run                    # endpoint check only
         """
+    )
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help=(
+            "LlamaFirewall endpoint URL. "
+            "Defaults to LLAMAFIREWALL_ENDPOINT env var or http://localhost:8080/v1. "
+            "Use private IP for corp-lab: http://10.0.0.4:8080/v1"
+        ),
     )
     parser.add_argument(
         "--category",
@@ -448,7 +471,7 @@ Examples:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Just verify the tunnel and proxy are reachable",
+        help="Just verify the endpoint is reachable",
     )
     args = parser.parse_args()
 
@@ -464,6 +487,7 @@ Examples:
         custom_prompts = data.get("prompts", [])
         print(f"\n  Loaded {len(custom_prompts)} prompts from {args.prompts_file}")
         run(categories=args.category, dry_run=args.dry_run,
-            prompt_overrides=custom_prompts)
+            prompt_overrides=custom_prompts, endpoint=args.endpoint)
     else:
-        run(categories=args.category, dry_run=args.dry_run)
+        run(categories=args.category, dry_run=args.dry_run,
+            endpoint=args.endpoint)

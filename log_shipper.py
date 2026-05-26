@@ -302,8 +302,23 @@ if __name__ == "__main__":
         default="azureuser@llamapoc-llama.eastus.cloudapp.azure.com",
         help="SSH target for live mode (user@hostname)",
     )
-    parser.add_argument("--workspace-id",  default=None, help="LAW workspace ID (overrides deploy-outputs.json)")
-    parser.add_argument("--workspace-key", default=None, help="LAW primary key (overrides deploy-outputs.json)")
+    parser.add_argument(
+        "--workspace-id",
+        default=None,
+        help=(
+            "Log Analytics Workspace ID. Overrides deploy-outputs.json. "
+            "Use this to target your corporate Sentinel LAW instead of the PoC workspace. "
+            "Find it: Azure Portal → Log Analytics → your workspace → Overview → Workspace ID"
+        )
+    )
+    parser.add_argument(
+        "--workspace-key",
+        default=None,
+        help=(
+            "Log Analytics primary key. Overrides deploy-outputs.json. "
+            "Find it: Azure Portal → Log Analytics → your workspace → Agents → Primary key"
+        )
+    )
     args = parser.parse_args()
 
     if args.mode in ("live", "both") and not args.vm_host:
@@ -313,7 +328,9 @@ if __name__ == "__main__":
     workspace_id, workspace_key = load_config(args)
     shipper = LogAnalyticsShipper(workspace_id, workspace_key)
 
-    print(f"\n  Workspace: {workspace_id[:8]}...  (loaded from deploy-outputs.json)")
+    # Show where credentials came from
+    source = "CLI flags" if (args.workspace_id and args.workspace_key) else "deploy-outputs.json"
+    print(f"\n  Workspace : {workspace_id[:8]}...  (from {source})")
 
     if args.mode in ("pyrit", "both"):
         ship_pyrit_results(shipper)

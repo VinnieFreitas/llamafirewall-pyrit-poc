@@ -332,7 +332,80 @@ existing workbook in-place rather than creating duplicates.
 
 ---
 
-## Cost Management
+## Corp-Lab Deployment
+
+The `corp-lab` profile deploys two VMs in an isolated sandbox subscription — a GPU VM for LlamaFirewall and a separate VM for PyRIT. Access is via BeyondTrust, no SSH tunnel needed.
+
+**Prerequisites before deploying:**
+1. NC-series quota approved in the sandbox subscription — request at: Portal → Subscriptions → Usage + quotas → Request increase (Standard NCSv3 Family or NCasT4 v3 Family)
+2. BeyondTrust jump server IP ready
+3. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
+
+**Deploy:**
+```bash
+# deploy.sh auto-generates a dedicated corp SSH key — do NOT reuse your personal key
+./deploy.sh
+# → y → 4 (corp-lab)
+# → Key generated at ~/.ssh/id_ed25519_llamapoc_corp
+# → Press Enter to continue
+```
+
+After deployment, note the outputs:
+- **LlamaFirewall private IP** — used by PyRIT to reach the firewall (e.g. `10.0.0.4`)
+- **PyRIT VM FQDN** — BeyondTrust connects here to run red-team sessions
+- **LlamaFirewall VM FQDN** — BeyondTrust connects here for admin/setup
+
+**Set up LlamaFirewall VM** (via BeyondTrust):
+```bash
+scp -i ~/.ssh/id_ed25519_llamapoc_corp \
+  setup_vm.sh proxy.py social_engineering_pt.nov \
+  azureuser@<lf-vm-fqdn>:~/
+
+ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<lf-vm-fqdn> \
+  'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
+```
+
+**Set up PyRIT VM** (via BeyondTrust):
+```bash
+# SSH into PyRIT VM
+ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<pyrit-vm-fqdn>
+
+# Install PyRIT
+sudo apt install python3.12-venv -y
+git clone <your-repo-url> ~/llamafirewall-pyrit-poc
+cd ~/llamafirewall-pyrit-poc
+chmod +x setup_pyrit.sh && ./setup_pyrit.sh
+source venv/bin/activate
+```
+
+**Run PyRIT** — no SSH tunnel needed, uses LlamaFirewall's private IP directly:
+```bash
+# On the PyRIT VM
+python3 pyrit_redteam.py \
+  --endpoint http://<lf-private-ip>:8080/v1 \
+  --prompts-file custom_attacks.yaml
+```
+
+**Ship logs to corporate Sentinel LAW:**
+```bash
+python3 log_shipper.py \
+  --mode pyrit \
+  --workspace-id <your-sentinel-workspace-id> \
+  --workspace-key <your-sentinel-primary-key>
+```
+
+> Sentinel workspace credentials: Portal → Log Analytics → your workspace → Agents → Primary key
+
+**Bypass mode** (incident response — from BeyondTrust terminal on LlamaFirewall VM):
+```bash
+sudo systemctl set-environment BYPASS_MODE=1
+sudo systemctl restart llamafirewall
+# Re-enable when incident resolved:
+sudo systemctl unset-environment BYPASS_MODE
+sudo systemctl restart llamafirewall
+```
+
+---
 
 ```bash
 # Deallocate VM when done (stops compute billing, keeps disk)
