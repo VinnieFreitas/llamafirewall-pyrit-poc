@@ -1,25 +1,61 @@
-# LlamaFirewall + PyRIT — Azure AI Security PoC
+# LlamaFirewall + PyRIT — AI Security Pipeline
 
-A self-hosted LLM security pipeline on Azure with automated red-team testing,
-observable via Log Analytics and an Azure Workbook dashboard.
+A layered LLM security pipeline built on Azure, with automated red-team testing
+and observability via Log Analytics and Azure Workbook. Deployable across four
+environment profiles — from a personal home lab to a corporate AKS production
+deployment.
 
+---
+
+## Architecture
+
+The project supports four deployment profiles, each with a different topology:
+
+**home-lab / home-preprod / home-production** — single VM, laptop runs PyRIT:
 ```
-[ Linux Laptop ]                        [ Azure ]
-  PyRIT ──── SSH tunnel ──────────────► LlamaFirewall proxy (:8080)
-  log_shipper ────────────────────────►        │
-                                         Ollama + LLM (:11434)
+[ Linux Laptop ]                          [ Azure VM ]
+  PyRIT ─── SSH tunnel ──────────────►  LlamaFirewall proxy (:8080)
+  log_shipper ──────────────────────►          │
+                                          Ollama + LLM (:11434)
                                                │
-                                         Log Analytics Workspace
+                                    Log Analytics Workspace
                                                │
-                                         Azure Workbook Dashboard
+                                    Azure Workbook Dashboard
 ```
 
-**Stack:**
-- **Ollama** — local LLM inference server. Runs open-source models on CPU/GPU and exposes an OpenAI-compatible API on `localhost:11434`. Used in this PoC in place of Azure OpenAI — same API format, no per-token cost. In production, swap the target URL to point at your Azure OpenAI endpoint and the rest of the stack stays identical.
-- **LLM model** — `phi3:mini` (lab) / `mistral:7b` (preprod) / `llama3:8b` (production), managed by Ollama
-- **LlamaFirewall** — Meta's open-source LLM security framework, extended here with a 6-layer scanner stack
-- **PyRIT** — Microsoft's open-source AI red-teaming toolkit, runs adversarial prompts against the firewall
-- **Observability** — Azure Log Analytics → Azure Workbook dashboard
+**corp-lab** — two VMs in sandbox subscription, BeyondTrust access:
+```
+[ BeyondTrust ]
+      │ SSH
+      ├──► PyRIT VM (B2ms)  ──────────────► LlamaFirewall VM (NC4as T4 GPU)
+      └──► LlamaFirewall VM                         │
+                                            Log Analytics → Sentinel
+```
+
+**corp-preprod / corp-prod** — LlamaFirewall containerised inside AKS:
+```
+User → EntraID → Angular SPA (AKS)
+                      │
+                 Backend (AKS)
+                      │  OPENAI_ENDPOINT=http://llamafirewall-svc:8080/v1
+                      ▼
+              LlamaFirewall pod (AKS)   ← one env var change in backend
+                      │
+                 Azure OpenAI (private endpoint, different subscription)
+                      │
+              Sentinel LAW ← canary CronJob (hourly)
+```
+
+---
+
+## Stack
+
+- **Ollama** — local LLM inference server. Exposes an OpenAI-compatible API on `:11434`. Used in home profiles in place of Azure OpenAI — swap one URL for production.
+- **LLM model** — `phi3:mini` (lab) / `mistral:7b` (preprod) / `llama3:8b` (production)
+- **LlamaFirewall** — Meta's open-source LLM security framework, extended with a 6-layer scanner stack
+- **PyRIT** — Microsoft's open-source AI red-teaming toolkit
+- **NOVA** — YARA-style prompt pattern matching engine (novahunting.ai)
+- **Observability** — Azure Log Analytics → Azure Workbook → Microsoft Sentinel
 
 **Firewall stack — 6 layers, runs in order on every prompt:**
 
@@ -38,73 +74,78 @@ observable via Log Analytics and an Azure Workbook dashboard.
 
 ## Environment Profiles
 
-The project supports three environment profiles, each with its own VM size,
-LLM model, scanner thresholds, and feature set.
-Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile.
+Four profiles drive VM size, LLM model, scanner thresholds, and topology.
+Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile interactively.
 
-| Setting | lab | preprod | production |
-|---|---|---|---|
-| **VM size** | Standard_B8ms | Standard_D8s_v3 | Standard_D16s_v3 |
-| **vCPU / RAM** | 8 / 32 GB | 8 / 32 GB | 16 / 64 GB |
-| **LLM model** | phi3:mini | mistral:7b | llama3:8b |
-| **PromptGuard threshold** | 0.05 (aggressive) | 0.10 (balanced) | 0.15 (conservative) |
-| **Output scanning** | ❌ | ✅ | ✅ |
-| **NOVA LLM tier** | ❌ | ❌ | ✅ |
-| **LAW retention** | 30 days | 30 days | 90 days |
-| **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ |
-| **Est. cost (light use)** | ~$16/month | ~$28/month | ~$55/month |
+| Setting | lab | preprod | production | corp-lab |
+|---|---|---|---|---|
+| **Topology** | Single VM | Single VM | Single VM | Two VMs |
+| **LF VM size** | B8ms | D8s_v3 | D16s_v3 | NC4as_T4_v3 (GPU) |
+| **PyRIT** | Laptop | Laptop | Laptop | B2ms VM |
+| **LLM model** | phi3:mini | mistral:7b | llama3:8b | phi3:mini |
+| **PromptGuard threshold** | 0.05 | 0.10 | 0.15 | 0.05 |
+| **Output scanning** | ❌ | ✅ | ✅ | ❌ |
+| **NOVA LLM tier** | ❌ | ❌ | ✅ | ❌ |
+| **LAW retention** | 30 days | 30 days | 90 days | 30 days |
+| **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ | ✅ 23:00 UTC |
+| **Access** | SSH tunnel | SSH tunnel | SSH tunnel | BeyondTrust |
+| **Est. cost (light use)** | ~$16/mo | ~$28/mo | ~$55/mo | ~$45/mo |
+
+> **corp-preprod** and **corp-prod** use containerised deployment in AKS — no Bicep profile needed.
 
 ---
 
 ## Repository Structure
 
-All files live in the repo root — no subdirectories.
-
 ```
 .
-├── main.bicep              # Azure infrastructure — profile-aware VM + LAW
-├── main.bicepparam         # Parameters (SSH key, profile, region)
+├── main.bicep              # Azure infrastructure — profile-aware (lab/preprod/production/corp-lab)
+├── main.bicepparam         # Parameters (SSH key, profile, region, BeyondTrust CIDR)
 ├── deploy.sh               # Step 1: interactive profile selector → deploys infra
-├── teardown.sh             # Step 1: destroys all Azure resources + cleans up local state
+├── teardown.sh             # Destroys all Azure resources + cleans up local state
 │
 ├── setup_vm.sh             # Step 2: VM bootstrap — accepts --profile lab|preprod|production
 ├── proxy.py                # Step 2: LlamaFirewall FastAPI proxy — 6-layer scanner stack
-├── test_tunnel.sh          # Step 2: SSH tunnel + smoke test
+├── test_tunnel.sh          # Step 2: SSH tunnel + smoke test (home profiles)
+│
+├── Dockerfile              # AKS deployment — CPU build (corp-preprod)
+├── Dockerfile.gpu          # AKS deployment — GPU build (corp-prod)
+├── .dockerignore           # Excludes infra/PyRIT/secrets from Docker build context
 │
 ├── setup_pyrit.sh          # Step 3: creates local venv + installs PyRIT
-├── pyrit_redteam.py        # Step 3: red-team script (built-in + YAML support)
+├── pyrit_redteam.py        # Step 3: red-team script (--endpoint, --category, --prompts-file)
 ├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories, PT-BR)
-├── attack_prompts.yaml     # Step 3: extended built-in attack library (40 prompts)
-├── social_engineering_pt.nov  # Step 3: NOVA rules — social engineering, bioweapon, tool injection
+├── attack_prompts.yaml     # Step 3: extended built-in attack library
+├── social_engineering_pt.nov  # NOVA rules — social engineering, bioweapon, tool injection
+├── canary_probe.py         # Production monitoring — 10-probe hourly canary + nightly full run
+├── .gitlab-ci.yml          # GitLab CI — manual PyRIT regression pipeline
 │
-├── log_shipper.py          # Step 4: ships PyRIT results + live events to LAW
+├── log_shipper.py          # Step 4: ships PyRIT results + live events to LAW / Sentinel
 │
 ├── workbook_content.json   # Step 5: Azure Workbook definition
 ├── deploy_workbook.py      # Step 5: deploys workbook (reuses same ID on redeploy)
 │
 ├── run_demo.sh             # Demo: preflight → PyRIT → log ship — one command
 ├── toggle_nollm.sh         # Toggle Ollama bypass for fast PyRIT runs
+├── toggle_bypass.sh        # Toggle full firewall bypass (incident response)
 │
 ├── deploy-outputs.json     # Generated by deploy.sh — gitignored, keep locally
 └── README.md
 ```
 
-> `deploy-outputs.json` is excluded from git (`.gitignore`) — it contains your
-> Log Analytics primary key. Generated automatically by `deploy.sh`.
+> `deploy-outputs.json` is excluded from git (`.gitignore`) — contains your LAW primary key.
 
 ---
 
 ## Prerequisites
 
-- Azure subscription (personal is fine)
+- Azure subscription (personal is fine for home profiles)
 - Azure CLI installed and logged in (`az login`)
 - Linux laptop with Python 3.10+, `ssh`, `jq`
-- HuggingFace account with access to:
-  - [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
+- HuggingFace account with access to [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
 - HuggingFace read token from https://huggingface.co/settings/tokens
 
-After cloning the repo, make all scripts executable:
-
+After cloning, make all scripts executable:
 ```bash
 chmod +x *.sh
 ```
@@ -135,44 +176,39 @@ PromptGuard 2 is a gated Meta model. One-time setup:
 ```bash
 cd ~/Documents/Safra_AI_Defense
 
-# 1. Generate SSH key — skip this if you already have one.
+# 1. Generate SSH key — skip if you already have one.
 #    Check first: ls ~/.ssh/id_ed25519.pub
-#    If the file exists, skip to step 2 and use that key.
+#    If the file exists, skip to step 2.
 #    If not, generate one:
 ssh-keygen -t ed25519 -C "llamapoc"
 
 # 2. Copy your public key into main.bicepparam
 #    Open the file and replace the adminPublicKey value with the output below:
 cat ~/.ssh/id_ed25519.pub
+#    It should look like: param adminPublicKey = 'ssh-ed25519 AAAAC3Nz... your-key-here'
+#    ⚠️  Do this before running deploy.sh — the script will stop if the
+#    placeholder value hasn't been replaced.
 
-#    It should look like this in main.bicepparam:
-#    param adminPublicKey = 'ssh-ed25519 AAAAC3Nz... your-key-here'
-#
-#    ⚠️  Do this before running deploy.sh — the script checks for the
-#    placeholder value and will stop with an error if it hasn't been replaced.
-
-# 3. Deploy — the script will prompt for environment profile
+# 3. Deploy — the script will prompt for profile
 chmod +x deploy.sh && ./deploy.sh
 ```
 
 The profile selector appears after confirming the subscription:
 
 ```
-1) lab         — Standard_B8ms  · phi3:mini   · ~$16/month
-2) preprod     — Standard_D8s_v3 · mistral:7b  · ~$28/month
-3) production  — Standard_D16s_v3 · llama3:8b  · ~$55/month
+1) lab         — Standard_B8ms   · phi3:mini   · ~$16/month
+2) preprod     — Standard_D8s_v3  · mistral:7b  · ~$28/month
+3) production  — Standard_D16s_v3 · llama3:8b   · ~$55/month
+4) corp-lab    — NC4as_T4_v3 GPU + B2ms PyRIT VM · ~$45/month
+                 ⚠️  Requires NC-series quota in sandbox subscription
 ```
 
-**What gets created (varies by profile):**
-- Ubuntu 22.04 LTS VM (size depends on profile)
-- VNet + NSG (SSH-only inbound)
-- Static public IP with DNS label
-- Log Analytics Workspace (30 or 90-day retention)
-- Auto-shutdown at 23:00 UTC (lab + preprod only)
+> **corp-lab** auto-generates a dedicated SSH key pair at `~/.ssh/id_ed25519_llamapoc_corp`.
+> Do NOT reuse your personal key in a corporate environment.
 
 ---
 
-## Step 2 — Set Up the VM
+## Step 2 — Set Up the VM (home profiles)
 
 ```bash
 # Copy scripts to VM (all three required)
@@ -184,12 +220,10 @@ ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
   'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
 ```
 
-The script installs all components for the selected profile:
-
 | Step | What happens |
 |---|---|
-| apt | System update + wait for apt-lock (Azure runs unattended-upgrades on boot) |
-| Ollama | Installs + pulls LLM model for the profile (phi3:mini / mistral:7b / llama3:8b) |
+| apt | System update + wait for apt-lock |
+| Ollama | Installs + pulls LLM model for the profile |
 | LlamaGuard3 | `ollama pull llama-guard3:8b` (~4.7 GB) |
 | Python | venv + llamafirewall + transformers + torch + nova-hunting |
 | HfFolder patch | Compatibility shim for huggingface_hub >= 0.25 |
@@ -200,15 +234,14 @@ The script installs all components for the selected profile:
 
 **Expected runtime:** lab ~20 min · preprod ~35 min · production ~45 min
 
-**Validate from your laptop:**
+**Validate:**
 ```bash
-chmod +x test_tunnel.sh
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
 Expected: `/health` shows 6 active scanners, clean prompt → ALLOW, injection → BLOCK.
 
-**Always warm up models before running PyRIT or test_tunnel.sh** — after a VM restart, models are evicted from RAM. Cold models cause LlamaGuard3 to timeout (~120s per prompt) on first requests. Warm-up takes 60-90 seconds and only needs to be done once per session:
+**Always warm up models before running PyRIT** — cold models cause LlamaGuard3 to timeout on first request:
 
 ```bash
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
@@ -221,34 +254,37 @@ EOF
 
 > Replace `phi3:mini` with `mistral:7b` or `llama3:8b` for preprod/production profiles.
 
-**Known issues fixed in this script:**
-1. **apt lock on first boot** — waits up to 2 min then force-clears
-2. **`ollama run` CLI hangs** — smoke test uses REST API instead
-3. **`huggingface_hub >= 0.25`** — `HfFolder` removed; script applies compatibility shim
-4. **LlamaFirewall `scanners` must be a dict** — `{Role: [ScannerType]}` not a list
-5. **Blocking scan in async handler** — `firewall.scan()` wrapped in `asyncio.to_thread()`
+**Known issues handled by the script:**
+1. apt lock on first boot — waits up to 2 min then force-clears
+2. `ollama run` CLI hangs — smoke test uses REST API with `--max-time 60`
+3. `huggingface_hub >= 0.25` — `HfFolder` removed, script applies compatibility shim
+4. LlamaFirewall `scanners` must be a dict — `{Role: [ScannerType]}`
+5. Blocking scan in async handler — `firewall.scan()` wrapped in `asyncio.to_thread()`
 
 ---
 
 ## Step 3 — Run PyRIT Red-Team (from your laptop)
 
 ```bash
-# From the repo root:
-
-# Install (one-time — auto-installs python3.X-venv if missing)
+# Install (one-time)
 chmod +x setup_pyrit.sh && ./setup_pyrit.sh
 
-# Open tunnel + warm models first
+# Open tunnel + warm models first (home profiles)
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 
 # Run full 87-prompt dataset
 source venv/bin/activate
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml
 
+# Run against a specific endpoint (corp-lab — private IP)
+python3 pyrit_redteam.py \
+  --endpoint http://10.0.0.4:8080/v1 \
+  --prompts-file custom_attacks.yaml
+
 # Run a single category
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml --category jailbreak
 
-# Dry run — validates tunnel only
+# Dry run — validates endpoint only
 python3 pyrit_redteam.py --dry-run
 ```
 
@@ -267,7 +303,7 @@ python3 pyrit_redteam.py --dry-run
 | `tool_abuse` | 2 | Command injection, dangerous function calls |
 | `policy_compliance` | 1 | Regulatory bypass |
 
-**Detection rate progression (lab profile):**
+**Detection rate progression:**
 
 | Run | Config | Pass rate |
 |---|---|---|
@@ -275,7 +311,7 @@ python3 pyrit_redteam.py --dry-run
 | 2 | PromptGuard 2 (threshold 0.05) | 60.92% |
 | 3 | + HiddenASCII + Regex + CustomPatterns | 72.41% |
 | 4 | + LlamaGuard 3:8B | 80.46% |
-| 5 | + dataset label fixes + input truncation | 88.51% |
+| 5 | + dataset fixes + input truncation | 88.51% |
 | 6 | + fail-closed on timeout | 90.80% |
 | **7** | **+ NOVA (keyword + semantic)** | **98.85%** |
 
@@ -299,22 +335,20 @@ Cuts per-prompt latency from ~23s down to ~7s.
 ```bash
 source venv/bin/activate
 
-# One-shot after each PyRIT session
+# After a PyRIT session
 python3 log_shipper.py --mode pyrit
+
+# Target corporate Sentinel LAW instead of the PoC workspace
+python3 log_shipper.py --mode pyrit \
+  --workspace-id <sentinel-workspace-id> \
+  --workspace-key <sentinel-primary-key>
 
 # Stream live events during a test
 python3 log_shipper.py --mode live \
   --vm-host azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
-**Verify data landed (KQL):**
-```kusto
-PyRITResults_CL
-| order by TimeGenerated desc
-| project TimeGenerated, Category, attack_name_s, outcome_s, decision_s, score_d
-```
-
-> LAW auto-types fields: `category` → `Category`, `run_timestamp` → `run_timestamp_t`.
+> Sentinel workspace credentials: Portal → Log Analytics → your workspace → Agents → Primary key
 
 ---
 
@@ -326,36 +360,56 @@ python3 deploy_workbook.py
 ```
 
 The workbook ID is persisted in `deploy-outputs.json` — re-running updates the
-existing workbook in-place rather than creating duplicates.
+existing workbook in-place without creating duplicates.
 
 **Azure Portal → Monitor → Workbooks → LlamaFirewall Security Dashboard**
 
 ---
 
+## Bypass Mode — Incident Response
+
+When legitimate traffic is being dropped by LlamaFirewall, enable bypass mode.
+The proxy stays running — no network changes needed. All bypassed requests are
+still logged to Sentinel with `scan_decision: BYPASS` for audit trail.
+
+**Home profiles (VM):**
+```bash
+./toggle_bypass.sh on    # disable scanning — forward directly to Ollama
+./toggle_bypass.sh off   # re-enable scanning
+./toggle_bypass.sh status
+```
+
+**Corp-preprod / corp-prod (AKS):**
+```bash
+kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
+# Re-enable when resolved:
+kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
+```
+
+---
+
 ## Corp-Lab Deployment
 
-The `corp-lab` profile deploys two VMs in an isolated sandbox subscription — a GPU VM for LlamaFirewall and a separate VM for PyRIT. Access is via BeyondTrust, no SSH tunnel needed.
+Two VMs in an isolated sandbox subscription. BeyondTrust for access, no SSH tunnel.
 
-**Prerequisites before deploying:**
-1. NC-series quota approved in the sandbox subscription — request at: Portal → Subscriptions → Usage + quotas → Request increase (Standard NCSv3 Family or NCasT4 v3 Family)
-2. BeyondTrust jump server IP ready
-3. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
+**Prerequisites:**
+1. NC-series quota approved in sandbox subscription — Portal → Subscriptions → Usage + quotas → Request increase
+2. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
 
 **Deploy:**
 ```bash
-# deploy.sh auto-generates a dedicated corp SSH key — do NOT reuse your personal key
 ./deploy.sh
 # → y → 4 (corp-lab)
-# → Key generated at ~/.ssh/id_ed25519_llamapoc_corp
+# → Dedicated SSH key auto-generated at ~/.ssh/id_ed25519_llamapoc_corp
 # → Press Enter to continue
 ```
 
-After deployment, note the outputs:
-- **LlamaFirewall private IP** — used by PyRIT to reach the firewall (e.g. `10.0.0.4`)
-- **PyRIT VM FQDN** — BeyondTrust connects here to run red-team sessions
-- **LlamaFirewall VM FQDN** — BeyondTrust connects here for admin/setup
+Outputs after deployment:
+- **LlamaFirewall private IP** — PyRIT connects here (e.g. `10.0.0.4`)
+- **PyRIT VM FQDN** — BeyondTrust access for red-team sessions
+- **LlamaFirewall VM FQDN** — BeyondTrust access for admin/setup
 
-**Set up LlamaFirewall VM** (via BeyondTrust):
+**Set up LlamaFirewall VM:**
 ```bash
 scp -i ~/.ssh/id_ed25519_llamapoc_corp \
   setup_vm.sh proxy.py social_engineering_pt.nov \
@@ -365,12 +419,9 @@ ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<lf-vm-fqdn> \
   'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
 ```
 
-**Set up PyRIT VM** (via BeyondTrust):
+**Set up PyRIT VM:**
 ```bash
-# SSH into PyRIT VM
 ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<pyrit-vm-fqdn>
-
-# Install PyRIT
 sudo apt install python3.12-venv -y
 git clone <your-repo-url> ~/llamafirewall-pyrit-poc
 cd ~/llamafirewall-pyrit-poc
@@ -378,151 +429,97 @@ chmod +x setup_pyrit.sh && ./setup_pyrit.sh
 source venv/bin/activate
 ```
 
-**Run PyRIT** — no SSH tunnel needed, uses LlamaFirewall's private IP directly:
+**Run PyRIT** — no SSH tunnel, direct private IP:
 ```bash
-# On the PyRIT VM
 python3 pyrit_redteam.py \
   --endpoint http://<lf-private-ip>:8080/v1 \
   --prompts-file custom_attacks.yaml
 ```
 
-**Ship logs to corporate Sentinel LAW:**
+**Ship to Sentinel:**
 ```bash
-python3 log_shipper.py \
-  --mode pyrit \
-  --workspace-id <your-sentinel-workspace-id> \
-  --workspace-key <your-sentinel-primary-key>
-```
-
-> Sentinel workspace credentials: Portal → Log Analytics → your workspace → Agents → Primary key
-
-**Bypass mode** (incident response — from BeyondTrust terminal on LlamaFirewall VM):
-```bash
-sudo systemctl set-environment BYPASS_MODE=1
-sudo systemctl restart llamafirewall
-# Re-enable when incident resolved:
-sudo systemctl unset-environment BYPASS_MODE
-sudo systemctl restart llamafirewall
+python3 log_shipper.py --mode pyrit \
+  --workspace-id <sentinel-workspace-id> \
+  --workspace-key <sentinel-primary-key>
 ```
 
 ---
 
 ## Corp-Preprod Deployment
 
-LlamaFirewall runs as a container inside your existing AKS cluster. PyRIT runs as a GitLab CI pipeline job triggered manually on every LlamaFirewall config change.
+LlamaFirewall runs as a container in your AKS cluster. PyRIT runs as a GitLab CI job.
 
 **Architecture:**
 ```
 GitLab CI (PyRIT job)
-        │  --endpoint http://llamafirewall-svc:8080/v1
-        ▼
-AKS cluster
-  └── llamafirewall deployment (Dockerfile — CPU build)
-        │  scans prompt
-        ▼
-  └── backend deployment
-        │
-        ▼
-  Azure OpenAI (private endpoint)
+    │  --endpoint http://llamafirewall-svc:8080/v1
+    ▼
+AKS → LlamaFirewall pod (CPU) → Azure OpenAI (private endpoint)
 ```
 
-**1. Build and push the container image:**
+**1. Build and push CPU image:**
 ```bash
-# Build CPU image
-docker build -t <your-acr>.azurecr.io/llamafirewall-proxy:preprod \
-  --build-arg HF_TOKEN=<your-hf-token> \
-  -f Dockerfile .
-
-# Push to Azure Container Registry
-az acr login --name <your-acr>
-docker push <your-acr>.azurecr.io/llamafirewall-proxy:preprod
+docker build -t <acr>.azurecr.io/llamafirewall-proxy:preprod \
+  --build-arg HF_TOKEN=<hf-token> -f Dockerfile .
+az acr login --name <acr>
+docker push <acr>.azurecr.io/llamafirewall-proxy:preprod
 ```
 
 **2. Deploy to AKS:**
 ```bash
-# Create namespace
 kubectl create namespace llamafirewall
-
-# Create secret for HuggingFace token and Sentinel credentials
 kubectl create secret generic llamafirewall-secrets \
   --namespace llamafirewall \
   --from-literal=HF_TOKEN=<hf-token> \
   --from-literal=SENTINEL_WORKSPACE_ID=<id> \
   --from-literal=SENTINEL_WORKSPACE_KEY=<key>
-
-# Apply manifests (see k8s/ folder — coming soon)
 kubectl apply -f k8s/llamafirewall-preprod.yaml
 ```
 
-**3. Point the backend at LlamaFirewall:**
-
-One environment variable change in the backend deployment — everything else stays the same:
+**3. Point backend at LlamaFirewall — one env var change:**
 ```bash
-# Before: backend calls Azure OpenAI directly
-# After:  backend calls LlamaFirewall, which forwards to Azure OpenAI
 kubectl set env deployment/backend \
   OPENAI_ENDPOINT=http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
   -n <backend-namespace>
 ```
 
-**4. Configure GitLab CI:**
-
-Set these variables in GitLab → Settings → CI/CD → Variables (mark as Masked):
+**4. Configure GitLab CI variables** (Settings → CI/CD → Variables → mark as Masked):
 
 | Variable | Value |
 |---|---|
 | `LLAMAFIREWALL_ENDPOINT` | `http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1` |
-| `SENTINEL_WORKSPACE_ID` | your Sentinel LAW workspace ID |
-| `SENTINEL_WORKSPACE_KEY` | your Sentinel LAW primary key |
+| `SENTINEL_WORKSPACE_ID` | your Sentinel workspace ID |
+| `SENTINEL_WORKSPACE_KEY` | your Sentinel primary key |
 
-Then update `YOUR_RUNNER_TAG_HERE` in `.gitlab-ci.yml` with the tag your DevOps team confirms.
-
-**5. Trigger a regression run:**
-
-GitLab → CI/CD → Pipelines → Run pipeline → select branch → Play
-
-**Bypass mode** (incident response):
-```bash
-kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
-# Re-enable when resolved:
-kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
-```
+Update `YOUR_RUNNER_TAG_HERE` in `.gitlab-ci.yml` with the runner tag your DevOps team confirms.
 
 ---
 
 ## Corp-Prod Deployment
 
-Same AKS architecture as preprod — GPU node pool, production profile, canary probe running as a CronJob.
+Same AKS architecture as preprod — GPU node pool, production profile, hourly canary probe.
 
 **Architecture:**
 ```
 User → EntraID → Angular SPA (AKS)
                       │
-                 Backend (AKS)
-                      │  OPENAI_ENDPOINT=http://llamafirewall-svc:8080/v1
-                      ▼
+                 Backend (AKS)  [one env var: OPENAI_ENDPOINT]
+                      │
               LlamaFirewall pod (AKS — GPU node pool)
-                      │  6-layer scanning
-                      ▼
-              Azure OpenAI (private endpoint)
                       │
-              Canary CronJob (AKS — hourly)
-                      │
-              Sentinel LAW → Alerts
+              Azure OpenAI (private endpoint, different subscription)
+
+              Canary CronJob (AKS) → Sentinel LAW → Alerts
 ```
 
 **1. Build and push GPU image:**
 ```bash
-docker build -t <your-acr>.azurecr.io/llamafirewall-proxy:prod \
-  --build-arg HF_TOKEN=<your-hf-token> \
-  -f Dockerfile.gpu .
-
-docker push <your-acr>.azurecr.io/llamafirewall-proxy:prod
+docker build -t <acr>.azurecr.io/llamafirewall-proxy:prod \
+  --build-arg HF_TOKEN=<hf-token> -f Dockerfile.gpu .
+docker push <acr>.azurecr.io/llamafirewall-proxy:prod
 ```
 
-**2. Deploy to AKS GPU node pool:**
-
-The GPU pod spec requires the `nvidia.com/gpu` resource limit:
+**2. Deploy to GPU node pool** — add to pod spec:
 ```yaml
 resources:
   requests:
@@ -531,40 +528,19 @@ resources:
     nvidia.com/gpu: 1
 ```
 
-**3. Deploy canary CronJob:**
-
-Runs every hour automatically — no manual intervention needed:
+**3. Deploy canary CronJob** (runs every hour automatically):
 ```bash
 kubectl apply -f k8s/canary-cronjob.yaml -n llamafirewall
 ```
 
 Manual canary run at any time:
 ```bash
-python3 canary_probe.py \
-  --mode canary \
+python3 canary_probe.py --mode canary \
   --endpoint http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
-  --workspace-id <sentinel-id> \
-  --workspace-key <sentinel-key>
+  --workspace-id <sentinel-id> --workspace-key <sentinel-key>
 ```
 
-**4. Bypass mode** (production incident — DevOps kubectl access required):
-```bash
-# Enable bypass — scanning disabled, traffic flows directly to Azure OpenAI
-kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
-
-# Check status
-kubectl exec -n llamafirewall deploy/llamafirewall -- \
-  curl -sf http://localhost:8080/health | python3 -m json.tool
-
-# Re-enable scanning when incident resolved
-kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
-```
-
-> ⚠️ Bypass mode is logged. Every bypassed request appears in Sentinel with `scan_decision: BYPASS` for full audit trail.
-
-**5. Sentinel alerting:**
-
-Create an Analytics Rule in Sentinel to alert when canary pass rate drops:
+**4. Sentinel alert** — create an Analytics Rule:
 ```kusto
 LlamaFirewallCanary_CL
 | where TimeGenerated > ago(2h)
@@ -574,6 +550,11 @@ LlamaFirewallCanary_CL
 ```
 
 ---
+
+## Cost Management
+
+```bash
+# Deallocate VM when done (stops compute billing, keeps disk)
 az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 
 # Start again when needed
@@ -587,38 +568,27 @@ az vm start --resource-group rg-llamapoc --name llamapoc-vm
 | lab | ~$8 (B8ms) | ~$5 | Free | **~$16/month** |
 | preprod | ~$15 (D8s_v3) | ~$8 | Free | **~$28/month** |
 | production | ~$32 (D16s_v3) | ~$15 | ~$5 | **~$55/month** |
+| corp-lab | ~$30 (NC4as+B2ms) | ~$10 | Free | **~$45/month** |
 
-> Production has no auto-shutdown — remember to deallocate manually.
+> Production and corp-prod have no auto-shutdown — remember to deallocate manually.
 
 ---
 
-## Teardown — Ending a Test Session
+## Teardown
 
 ```bash
-# 1. Stop log shipper (if running)
-#    Ctrl+C in the terminal running log_shipper.py --mode live
-
-# 2. Close SSH tunnel
+# 1. Close SSH tunnel (home profiles)
 kill $(cat /tmp/llamapoc_tunnel.pid)
 
-# 3. Deallocate VM  ← most important
+# 2. Deallocate VM
 az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 ```
 
-> ⚠️ **Deallocate ≠ Shutdown.** `sudo shutdown` stops the OS but Azure keeps
-> billing for compute. Always use `az vm deallocate` or the portal **Stop** button.
-
-**Verify deallocated:**
-```bash
-az vm get-instance-view --resource-group rg-llamapoc --name llamapoc-vm \
-  --query "instanceView.statuses[1].displayStatus" -o tsv
-# Expected: VM deallocated
-```
+> ⚠️ **Deallocate ≠ Shutdown.** `sudo shutdown` keeps billing. Always use `az vm deallocate`.
 
 **Resuming:**
 ```bash
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
-# Wait ~60s, then open tunnel
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 # Warm up models before running PyRIT
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
@@ -629,7 +599,7 @@ curl -sf http://localhost:11434/api/generate \
 EOF
 ```
 
-**Full destroy (wipe everything):**
+**Full destroy:**
 ```bash
 ./teardown.sh
 ```
@@ -638,7 +608,7 @@ EOF
 
 ## Production Hardening Roadmap
 
-**Implemented across all profiles:**
+**Implemented:**
 
 | ✅ | Scanner | What it catches |
 |---|---|---|
@@ -649,19 +619,22 @@ EOF
 | ✅ | NOVA (keyword+semantic) | Logic traps, tool injection, bioweapon synthesis |
 | ✅ (preprod+prod) | Output scanning | Harmful content in LLM responses |
 
-**Remaining roadmap items:**
+**Roadmap:**
 
 | Gap | Notes | Fix |
 |---|---|---|
-| NOVA LLM tier | Disabled — phi3:mini caused false positives on benign prompts | Dedicated safety classifier on GPU |
-| GPU inference | CPU stack averages ~23s/prompt | NC-series T4 VM → ~1-2s/prompt |
-| Sentinel integration | LAW only for now | Enable Microsoft Sentinel on the workspace |
+| NOVA LLM tier | Disabled — phi3:mini caused false positives | Dedicated safety classifier on GPU |
+| GPU inference | CPU averages ~23s/prompt | NC-series T4 → ~1-2s/prompt (implemented in corp-lab/prod) |
+| Kubernetes manifests | k8s/ folder referenced but not yet committed | Add Deployment, Service, ConfigMap, CronJob YAMLs |
+| GitLab runner tag | `YOUR_RUNNER_TAG_HERE` placeholder in `.gitlab-ci.yml` | Update when DevOps confirms runner type |
 
 ---
 
 ## Security Notes
 
 - `deploy-outputs.json` contains your LAW primary key — **never commit this file**
-- NSG allows SSH from any IP by default — restrict `sourceAddressPrefix` in `main.bicep`
-- LlamaFirewall proxy binds to `127.0.0.1` only — only reachable via SSH tunnel
-- HuggingFace token is injected into systemd env — not stored in any config file
+- Home profiles: NSG allows SSH from any IP — restrict `sourceAddressPrefix` in `main.bicep` for production use
+- Corp-lab: NSG restricts SSH to BeyondTrust source CIDR only
+- LlamaFirewall proxy binds to `127.0.0.1` on VMs — only reachable via SSH tunnel or internal VNet
+- HuggingFace token is injected into systemd env / Kubernetes secret — never stored in config files
+- Corp SSH key (`id_ed25519_llamapoc_corp`) is separate from personal key — never reuse personal keys in corporate environments
