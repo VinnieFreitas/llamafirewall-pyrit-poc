@@ -407,8 +407,173 @@ sudo systemctl restart llamafirewall
 
 ---
 
+## Corp-Preprod Deployment
+
+LlamaFirewall runs as a container inside your existing AKS cluster. PyRIT runs as a GitLab CI pipeline job triggered manually on every LlamaFirewall config change.
+
+**Architecture:**
+```
+GitLab CI (PyRIT job)
+        │  --endpoint http://llamafirewall-svc:8080/v1
+        ▼
+AKS cluster
+  └── llamafirewall deployment (Dockerfile — CPU build)
+        │  scans prompt
+        ▼
+  └── backend deployment
+        │
+        ▼
+  Azure OpenAI (private endpoint)
+```
+
+**1. Build and push the container image:**
 ```bash
-# Deallocate VM when done (stops compute billing, keeps disk)
+# Build CPU image
+docker build -t <your-acr>.azurecr.io/llamafirewall-proxy:preprod \
+  --build-arg HF_TOKEN=<your-hf-token> \
+  -f Dockerfile .
+
+# Push to Azure Container Registry
+az acr login --name <your-acr>
+docker push <your-acr>.azurecr.io/llamafirewall-proxy:preprod
+```
+
+**2. Deploy to AKS:**
+```bash
+# Create namespace
+kubectl create namespace llamafirewall
+
+# Create secret for HuggingFace token and Sentinel credentials
+kubectl create secret generic llamafirewall-secrets \
+  --namespace llamafirewall \
+  --from-literal=HF_TOKEN=<hf-token> \
+  --from-literal=SENTINEL_WORKSPACE_ID=<id> \
+  --from-literal=SENTINEL_WORKSPACE_KEY=<key>
+
+# Apply manifests (see k8s/ folder — coming soon)
+kubectl apply -f k8s/llamafirewall-preprod.yaml
+```
+
+**3. Point the backend at LlamaFirewall:**
+
+One environment variable change in the backend deployment — everything else stays the same:
+```bash
+# Before: backend calls Azure OpenAI directly
+# After:  backend calls LlamaFirewall, which forwards to Azure OpenAI
+kubectl set env deployment/backend \
+  OPENAI_ENDPOINT=http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
+  -n <backend-namespace>
+```
+
+**4. Configure GitLab CI:**
+
+Set these variables in GitLab → Settings → CI/CD → Variables (mark as Masked):
+
+| Variable | Value |
+|---|---|
+| `LLAMAFIREWALL_ENDPOINT` | `http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1` |
+| `SENTINEL_WORKSPACE_ID` | your Sentinel LAW workspace ID |
+| `SENTINEL_WORKSPACE_KEY` | your Sentinel LAW primary key |
+
+Then update `YOUR_RUNNER_TAG_HERE` in `.gitlab-ci.yml` with the tag your DevOps team confirms.
+
+**5. Trigger a regression run:**
+
+GitLab → CI/CD → Pipelines → Run pipeline → select branch → Play
+
+**Bypass mode** (incident response):
+```bash
+kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
+# Re-enable when resolved:
+kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
+```
+
+---
+
+## Corp-Prod Deployment
+
+Same AKS architecture as preprod — GPU node pool, production profile, canary probe running as a CronJob.
+
+**Architecture:**
+```
+User → EntraID → Angular SPA (AKS)
+                      │
+                 Backend (AKS)
+                      │  OPENAI_ENDPOINT=http://llamafirewall-svc:8080/v1
+                      ▼
+              LlamaFirewall pod (AKS — GPU node pool)
+                      │  6-layer scanning
+                      ▼
+              Azure OpenAI (private endpoint)
+                      │
+              Canary CronJob (AKS — hourly)
+                      │
+              Sentinel LAW → Alerts
+```
+
+**1. Build and push GPU image:**
+```bash
+docker build -t <your-acr>.azurecr.io/llamafirewall-proxy:prod \
+  --build-arg HF_TOKEN=<your-hf-token> \
+  -f Dockerfile.gpu .
+
+docker push <your-acr>.azurecr.io/llamafirewall-proxy:prod
+```
+
+**2. Deploy to AKS GPU node pool:**
+
+The GPU pod spec requires the `nvidia.com/gpu` resource limit:
+```yaml
+resources:
+  requests:
+    nvidia.com/gpu: 1
+  limits:
+    nvidia.com/gpu: 1
+```
+
+**3. Deploy canary CronJob:**
+
+Runs every hour automatically — no manual intervention needed:
+```bash
+kubectl apply -f k8s/canary-cronjob.yaml -n llamafirewall
+```
+
+Manual canary run at any time:
+```bash
+python3 canary_probe.py \
+  --mode canary \
+  --endpoint http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
+  --workspace-id <sentinel-id> \
+  --workspace-key <sentinel-key>
+```
+
+**4. Bypass mode** (production incident — DevOps kubectl access required):
+```bash
+# Enable bypass — scanning disabled, traffic flows directly to Azure OpenAI
+kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
+
+# Check status
+kubectl exec -n llamafirewall deploy/llamafirewall -- \
+  curl -sf http://localhost:8080/health | python3 -m json.tool
+
+# Re-enable scanning when incident resolved
+kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
+```
+
+> ⚠️ Bypass mode is logged. Every bypassed request appears in Sentinel with `scan_decision: BYPASS` for full audit trail.
+
+**5. Sentinel alerting:**
+
+Create an Analytics Rule in Sentinel to alert when canary pass rate drops:
+```kusto
+LlamaFirewallCanary_CL
+| where TimeGenerated > ago(2h)
+| where canary_run_type_s == "canary"
+| summarize pass_rate = avg(pass_rate_d) by bin(TimeGenerated, 1h)
+| where pass_rate < 90
+```
+
+---
 az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 
 # Start again when needed
