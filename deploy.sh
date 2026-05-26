@@ -100,16 +100,16 @@ if [[ "${PROFILE}" == "corp-lab" ]]; then
         if [[ "${USE_EXISTING,,}" == "n" ]]; then
             echo "  Generating new corp key..."
             ssh-keygen -t ed25519 -C "llamapoc-corp-lab" -f "${CORP_KEY}" -N ""
-            ok "New corp SSH key generated at ${CORP_KEY}"
+            echo "  ✓  New corp SSH key generated at ${CORP_KEY}"
         else
-            ok "Using existing corp key."
+            echo "  ✓  Using existing corp key."
         fi
     else
         echo "  No corp key found — generating a dedicated key pair."
         echo "  ⚠️  Do NOT reuse your personal key in a corporate environment."
         echo ""
         ssh-keygen -t ed25519 -C "llamapoc-corp-lab" -f "${CORP_KEY}" -N ""
-        ok "Corp SSH key generated at ${CORP_KEY}"
+        echo "  ✓  Corp SSH key generated at ${CORP_KEY}"
     fi
 
     CORP_PUBLIC_KEY=$(cat "${CORP_KEY}.pub")
@@ -120,14 +120,14 @@ if [[ "${PROFILE}" == "corp-lab" ]]; then
     # Inject the corp key into main.bicepparam
     sed -i "s|param adminPublicKey = '.*'|param adminPublicKey = '${CORP_PUBLIC_KEY}'|" \
         "${SCRIPT_DIR}/main.bicepparam"
-    ok "Corp public key injected into main.bicepparam."
+    echo "  ✓  Corp public key injected into main.bicepparam."
 
     echo ""
-    warn "Keep ${CORP_KEY} safe — this is the only way to SSH into your corp VMs."
-    warn "Add to your SSH config for convenience:"
-    echo "    Host llamapoc-corp-*"
-    echo "      IdentityFile ${CORP_KEY}"
-    echo "      User azureuser"
+    echo "  ⚠️  Keep ${CORP_KEY} safe — this is the only way to SSH into your corp VMs."
+    echo "  Add to your SSH config for convenience:"
+    echo "      Host llamapoc-corp-*"
+    echo "        IdentityFile ${CORP_KEY}"
+    echo "        User azureuser"
     echo ""
 fi
 
