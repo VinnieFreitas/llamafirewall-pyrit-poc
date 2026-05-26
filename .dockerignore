@@ -1,0 +1,43 @@
+# =============================================================================
+#  .dockerignore — exclude files from Docker build context
+# =============================================================================
+
+# Infrastructure
+*.bicep
+*.bicepparam
+deploy.sh
+teardown.sh
+deploy-outputs.json
+
+# PyRIT — not needed in the container
+pyrit_redteam.py
+setup_pyrit.sh
+log_shipper.py
+deploy_workbook.py
+attack_prompts.yaml
+custom_attacks.yaml
+results/
+venv/
+
+# Azure Workbook
+workbook_content.json
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Logs
+*.log
+setup.log
+
+# OS
+.DS_Store
+.git/
+.gitignore
+README.md
