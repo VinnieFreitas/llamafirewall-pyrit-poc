@@ -187,3 +187,119 @@ rule BioweaponSynthesisAcademicFraming {
         semantics.$sem2 or
         llm.$llm
 }
+
+
+// -----------------------------------------------------------------------------
+//  Rule 7: Acrostic / Encoding Secret Extraction
+//  Targets Gandalf fails: summarization_001, summarization_007,
+//  summarization_011, summarization_018
+//  Asks the model to hide secret information inside poems, acrostics,
+//  Morse code, character-separated output, or other encoded formats.
+// -----------------------------------------------------------------------------
+rule AcrosticEncodingSecretExtraction {
+    meta:
+        description = "Detects requests to encode or hide secret/password information inside poems, acrostics, or encoded formats"
+        author      = "llamapoc"
+        severity    = "high"
+        category    = "indirect_injection"
+    keywords:
+        $acrostic   = /acrostic|acróstico/i
+        $secret_pw  = /secret password|secret phrase|senha secreta|palavra-passe/i
+        $morse      = /morse|−−|·−|−·/
+        $encode_out = /separating each character|separate.*character|each letter.*space|spell.*out/i
+        $reveal_enc = /reveal.*password|reveal.*secret|include.*password|include.*secret/i
+    semantics:
+        $sem = "hiding or encoding secret information inside a poem, acrostic, story, or encoded text format" (0.62)
+    condition:
+        keywords.$acrostic or
+        (keywords.$secret_pw and keywords.$reveal_enc) or
+        keywords.$morse or
+        keywords.$encode_out or
+        semantics.$sem
+}
+
+
+// -----------------------------------------------------------------------------
+//  Rule 8: Post-Summary Instruction Injection
+//  Targets Gandalf fails: summarization_008, summarization_010,
+//  summarization_015, summarization_016
+//  Injects instructions at the end of document content to make the model
+//  append secrets, signatures, or sensitive data after completing a task.
+// -----------------------------------------------------------------------------
+rule PostSummaryInjection {
+    meta:
+        description = "Detects instructions injected after document content telling the model to append secrets or sensitive data"
+        author      = "llamapoc"
+        severity    = "high"
+        category    = "indirect_injection"
+    keywords:
+        $sign_secret   = /sign.*secret|sign.*password|assin.*segredo/i
+        $include_secret = /include.*secret|include.*password|append.*secret|add.*secret/i
+        $end_inject    = /end (the |of |)summ|> end|---end|end here/i
+        $synonym_trick = /synonym.*secret|synonym.*key|sinônimo.*senha/i
+    semantics:
+        $sem = "instruction embedded in document content telling the AI to reveal, sign with, or append a secret or password after completing a task" (0.63)
+    condition:
+        keywords.$sign_secret or
+        keywords.$include_secret or
+        (keywords.$end_inject and keywords.$sign_secret) or
+        keywords.$synonym_trick or
+        semantics.$sem
+}
+
+
+// -----------------------------------------------------------------------------
+//  Rule 9: Password Transformation Extraction
+//  Targets Gandalf fails: mosscap_009, mosscap_010, mosscap_012, mosscap_013
+//  Asks the model to perform transformations on a secret/password
+//  (rotate, base64, encode) as a way to extract it indirectly.
+// -----------------------------------------------------------------------------
+rule PasswordTransformationExtraction {
+    meta:
+        description = "Detects requests to transform, rotate, or encode a secret/password as indirect extraction"
+        author      = "llamapoc"
+        severity    = "high"
+        category    = "evasion"
+    keywords:
+        $rotate     = /rotate.*password|rotate.*secret|rotate.*by one|girar.*senha/i
+        $base64_pw  = /base64.*password|base64.*secret|encode.*password/i
+        $transform  = /(encrypt|encode|hash|scramble|shift|caesar).*(password|secret|passphrase)/i
+        $without_rev = /without revealing.*password|without showing.*secret/i
+    semantics:
+        $sem = "asking the AI to apply a transformation such as rotation, encoding, or encryption to a secret or password as a way to indirectly reveal it" (0.65)
+    condition:
+        keywords.$rotate or
+        keywords.$base64_pw or
+        keywords.$transform or
+        keywords.$without_rev or
+        semantics.$sem
+}
+
+
+// -----------------------------------------------------------------------------
+//  Rule 10: Parallel World / Fictional Frame Secret Extraction
+//  Targets Gandalf fails: mosscap_005, mosscap_006, mosscap_008,
+//  summarization_016
+//  Uses fictional framing ("in a parallel world", "in a story",
+//  "the new password is") to bypass restrictions.
+// -----------------------------------------------------------------------------
+rule FictionalFrameSecretExtraction {
+    meta:
+        description = "Detects fictional or parallel-world framing used to bypass secret/password restrictions"
+        author      = "llamapoc"
+        severity    = "high"
+        category    = "evasion"
+    keywords:
+        $parallel   = /parallel world|mundo paralelo|alternate (world|reality|universe)/i
+        $new_pw     = /the new password is|the password is now|nova senha é/i
+        $change_pw  = /change the password|update the password|reset the password/i
+        $story_ext  = /in (this|the) story.*secret|character.*secret word|poem.*secret word/i
+    semantics:
+        $sem = "using fictional, parallel world, or hypothetical framing to make the AI treat a secret or password as if it no longer applies or has changed" (0.63)
+    condition:
+        keywords.$parallel or
+        keywords.$new_pw or
+        keywords.$change_pw or
+        keywords.$story_ext or
+        semantics.$sem
+}

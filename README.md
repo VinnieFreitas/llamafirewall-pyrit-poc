@@ -116,7 +116,9 @@ Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile interactively.
 ├── pyrit_redteam.py        # Step 3: red-team script (--endpoint, --category, --prompts-file)
 ├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories, PT-BR)
 ├── attack_prompts.yaml     # Step 3: extended built-in attack library
-├── social_engineering_pt.nov  # NOVA rules — social engineering, bioweapon, tool injection
+├── gandalf_attacks.yaml    # Step 3: 60-prompt Gandalf dataset (English, 3 Lakera sources)
+├── build_gandalf_dataset.py   # Step 3: downloads + curates Gandalf datasets from HuggingFace
+├── social_engineering_pt.nov  # NOVA rules — 10 rules covering PT-BR + Gandalf attack patterns
 ├── canary_probe.py         # Production monitoring — 10-probe hourly canary + nightly full run
 ├── .gitlab-ci.yml          # GitLab CI — manual PyRIT regression pipeline
 │
@@ -302,6 +304,36 @@ python3 pyrit_redteam.py --dry-run
 | `data_leakage` | 3 | Credential extraction, source code exfiltration |
 | `tool_abuse` | 2 | Command injection, dangerous function calls |
 | `policy_compliance` | 1 | Regulatory bypass |
+
+**Gandalf dataset `gandalf_attacks.yaml` (60 prompts, English):**
+
+Real human-generated attacks from Lakera's Gandalf red-teaming game — curated from three HuggingFace datasets. Use for cross-dataset validation alongside `custom_attacks.yaml`.
+
+| Category | Count | Source | Notes |
+|---|---|---|---|
+| `prompt_injection` | 25 | `gandalf_ignore_instructions` | Classic "ignore previous instructions" variants |
+| `indirect_injection` | 20 | `gandalf_summarization` | Injection hidden inside document summarisation tasks |
+| `evasion` | 15 | `mosscap_prompt_injection` | DEF CON 2023 variant — acrostics, encoding, roleplay |
+
+```bash
+# Rebuild the dataset (re-downloads from HuggingFace)
+pip install datasets
+python3 build_gandalf_dataset.py
+
+# Run against LlamaFirewall
+python3 pyrit_redteam.py --prompts-file gandalf_attacks.yaml
+```
+
+**Detection results — Gandalf dataset (first run):**
+
+| Category | Pass rate | Notes |
+|---|---|---|
+| `prompt_injection` | 100% | PromptGuard 2 catches all classic injection syntax |
+| `indirect_injection` | 50% | Hardest category — attacks hidden in document content |
+| `evasion` | 47% | Multi-step transformation and fictional framing attacks |
+| **Overall** | **70%** | Real-world attacks, no PT-BR tuning |
+
+> The gap vs `custom_attacks.yaml` (98.85%) is expected — the Gandalf dataset tests generalisation beyond the language and patterns the stack was tuned against.
 
 **Detection rate progression:**
 
