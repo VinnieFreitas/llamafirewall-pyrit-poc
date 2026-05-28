@@ -360,6 +360,19 @@ resource lfVM 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   location: location
   properties: {
     hardwareProfile: { vmSize: cfg.llamafirewallVMSize }
+    // ---------------------------------------------------------------------------
+    //  Security profile — Trusted Launch must be DISABLED for GPU VMs.
+    //  corp profiles (corp-lab, preprod, production) use Standard security type
+    //  so the NVIDIA driver kernel module can bind correctly.
+    //  home-lab keeps TrustedLaunch (no GPU, more secure default).
+    // ---------------------------------------------------------------------------
+    securityProfile: {
+      securityType: (profile == 'lab') ? 'TrustedLaunch' : 'Standard'
+      uefiSettings: (profile == 'lab') ? {
+        secureBootEnabled: true
+        vTpmEnabled:       true
+      } : null
+    }
     osProfile: {
       computerName:  lfVMName
       adminUsername: adminUsername
@@ -431,6 +444,9 @@ resource pyritVM 'Microsoft.Compute/virtualMachines@2023-09-01' = if (cfg.deploy
   location: location
   properties: {
     hardwareProfile: { vmSize: cfg.pyritVMSize }
+    securityProfile: {
+      securityType: 'Standard'   // Trusted Launch disabled — consistent with LF VM in corp profiles
+    }
     osProfile: {
       computerName:  pyritVMName
       adminUsername: adminUsername

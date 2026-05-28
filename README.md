@@ -426,8 +426,10 @@ kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
 Two VMs in an isolated sandbox subscription. BeyondTrust for access, no SSH tunnel.
 
 **Prerequisites:**
-1. NC-series quota approved in sandbox subscription — Portal → Subscriptions → Usage + quotas → Request increase
+1. NC-series quota approved in sandbox subscription — Portal → Subscriptions → Usage + quotas → Request increase (Standard NCASv3_T4 Family, minimum 4 vCPUs)
 2. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
+3. **Trusted Launch is automatically disabled** in Bicep for all corp profiles — required for NVIDIA GPU driver to bind correctly. Do not re-enable it.
+4. When connecting via Bastion, GitHub requires a Personal Access Token for git clone (password auth disabled) — generate at: github.com → Settings → Developer settings → Personal access tokens → repo scope
 
 **Deploy:**
 ```bash
@@ -444,21 +446,33 @@ Outputs after deployment:
 
 **Set up LlamaFirewall VM:**
 ```bash
-scp -i ~/.ssh/id_ed25519_llamapoc_corp \
-  setup_vm.sh proxy.py social_engineering_pt.nov \
-  azureuser@<lf-vm-fqdn>:~/
+# Connect via Bastion → SSH terminal opens in browser
+# Clone the repo (GitHub requires a Personal Access Token — password auth is disabled)
+# Generate one at: github.com → Settings → Developer settings → Personal access tokens
+# Scope: repo · Expiration: 7 days is enough
+git clone https://<your-github-username>:<YOUR_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
+cd llamafirewall-pyrit-poc
+chmod +x *.sh
 
-ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<lf-vm-fqdn> \
-  'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
+# Run setup — detects repo location automatically (no scp needed)
+bash setup_vm.sh --profile lab 2>&1 | tee ~/setup.log
+
+# After setup — manually copy NOVA rules if needed
+sudo cp social_engineering_pt.nov /opt/llamafirewall/nova-rules-custom/
+sudo systemctl restart llamafirewall
+curl -sf http://localhost:8080/health  # should show NOVA(10rules)
 ```
 
 **Set up PyRIT VM:**
 ```bash
-ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<pyrit-vm-fqdn>
-sudo apt install python3.12-venv -y
-git clone <your-repo-url> ~/llamafirewall-pyrit-poc
-cd ~/llamafirewall-pyrit-poc
-chmod +x setup_pyrit.sh && ./setup_pyrit.sh
+# Connect via Bastion → SSH terminal opens in browser
+git clone https://<your-github-username>:<YOUR_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
+cd llamafirewall-pyrit-poc
+chmod +x *.sh
+
+# Install PyRIT
+sudo apt install python3.10-venv -y
+./setup_pyrit.sh
 source venv/bin/activate
 ```
 

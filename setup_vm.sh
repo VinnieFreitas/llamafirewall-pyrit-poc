@@ -175,7 +175,7 @@ ok "llama-guard3:8b ready."
 # =============================================================================
 log "Creating Python venv at ${INSTALL_DIR}..."
 sudo mkdir -p "${INSTALL_DIR}"
-sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}"
+sudo chown "${SERVICE_USER}" "${INSTALL_DIR}"
 
 PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 sudo apt-get install -y -qq "python3.${PY_VER}-venv" 2>/dev/null || true
@@ -235,11 +235,21 @@ ok "Compatibility patch applied."
 #  6. DEPLOY PROXY.PY
 # =============================================================================
 log "Deploying proxy.py..."
+# Handle both deployment methods:
+#   1. scp proxy.py azureuser@<vm>:~/          (home-lab, files copied directly)
+#   2. git clone <repo> ~/llamafirewall-pyrit-poc  (corp-lab, cloned from git)
+PROXY_SRC=""
 if [[ -f "/home/${SERVICE_USER}/proxy.py" ]]; then
-    cp "/home/${SERVICE_USER}/proxy.py" "${INSTALL_DIR}/proxy.py"
-    ok "proxy.py deployed."
+    PROXY_SRC="/home/${SERVICE_USER}/proxy.py"
+elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/proxy.py" ]]; then
+    PROXY_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/proxy.py"
+fi
+
+if [[ -n "${PROXY_SRC}" ]]; then
+    cp "${PROXY_SRC}" "${INSTALL_DIR}/proxy.py"
+    ok "proxy.py deployed from ${PROXY_SRC}."
 else
-    fail "proxy.py not found in ~/. Run: scp proxy.py azureuser@<vm-fqdn>:~/"
+    fail "proxy.py not found. Either:\n  scp proxy.py azureuser@<vm-fqdn>:~/\n  or clone the repo: git clone <repo-url> ~/llamafirewall-pyrit-poc"
 fi
 
 # =============================================================================
@@ -255,10 +265,16 @@ ok "Official NOVA rules cloned."
 
 mkdir -p "${INSTALL_DIR}/nova-rules-custom"
 
+NOV_SRC=""
 if [[ -f "/home/${SERVICE_USER}/social_engineering_pt.nov" ]]; then
-    cp "/home/${SERVICE_USER}/social_engineering_pt.nov" \
-       "${INSTALL_DIR}/nova-rules-custom/"
-    ok "Custom NOVA rules deployed."
+    NOV_SRC="/home/${SERVICE_USER}/social_engineering_pt.nov"
+elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/social_engineering_pt.nov" ]]; then
+    NOV_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/social_engineering_pt.nov"
+fi
+
+if [[ -n "${NOV_SRC}" ]]; then
+    cp "${NOV_SRC}" "${INSTALL_DIR}/nova-rules-custom/"
+    ok "Custom NOVA rules deployed from ${NOV_SRC}."
 else
     warn "social_engineering_pt.nov not found — deploy manually:"
     echo "  scp social_engineering_pt.nov ${SERVICE_USER}@<vm-fqdn>:/opt/llamafirewall/nova-rules-custom/"
@@ -299,11 +315,16 @@ ok "PromptGuard 2 cached at ${INSTALL_DIR}/.cache/huggingface"
 # =============================================================================
 #  9. SYSTEMD SERVICE
 # =============================================================================
-log "Creating llamafirewall.service (profile: ${PROFILE})..."
+# Bind address — home-lab uses 127.0.0.1 (SSH tunnel only)
+#                corp profiles use 0.0.0.0 (PyRIT VM reaches LF over VNet)
+BIND_HOST="127.0.0.1"
+if [[ "${PROFILE}" != "lab" ]]; then
+    BIND_HOST="0.0.0.0"
+fi
 
 sudo tee /etc/systemd/system/llamafirewall.service > /dev/null << SERVICE_EOF
 [Unit]
-Description=LlamaFirewall Proxy (OpenAI-compatible, port ${FIREWALL_PORT}) [${PROFILE}]
+Description=LlamaFirewall Proxy [${PROFILE}] port ${FIREWALL_PORT} bind ${BIND_HOST}
 After=network.target ollama.service
 Requires=ollama.service
 
@@ -322,7 +343,7 @@ Environment="NOVA_LLM_ENABLED=${NOVA_LLM}"
 Environment="LLAMA_GUARD_DISABLED=${LLAMA_GUARD_DISABLED}"
 
 ExecStart=${INSTALL_DIR}/venv/bin/uvicorn proxy:app \
-    --host 127.0.0.1 \
+    --host ${BIND_HOST} \
     --port ${FIREWALL_PORT} \
     --workers 1 \
     --log-level warning
