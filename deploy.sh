@@ -233,8 +233,15 @@ echo "  Profile        : ${PROFILE_USED} — ${PROFILE_DESC}"
 echo "  VM Size        : ${VM_SIZE_USED}"
 echo "  VM Public IP   : ${VM_IP}"
 echo "  VM FQDN        : ${VM_FQDN}"
+echo "  VM Private IP  : $(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('llamafirewallPrivateIP',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")"
 echo ""
-echo "  SSH connect    : ${SSH_CMD}"
+if [[ "${VM_IP}" == "no-public-ip" ]]; then
+    echo "  ℹ️  No public IP — this is a corporate profile."
+    echo "     Access via BeyondTrust using the private IP above."
+    echo "     SSH connect: ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<private-ip>"
+else
+    echo "  SSH connect    : ${SSH_CMD}"
+fi
 
 # corp-lab: also print PyRIT VM details
 PYRIT_IP=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pyritVMPublicIP',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")
