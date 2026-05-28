@@ -60,7 +60,7 @@ var profileConfig = {
     autoShutdown:        true
     diskType:            'StandardSSD_LRS'
     deployPyRITVM:       false
-    publicIP:            true                // needs public IP for SSH tunnel
+    publicIP:            true                // needs public IP for SSH tunnel from laptop
     description:         'Home Lab — B8ms, phi3:mini, SSH tunnel from laptop'
   }
   preprod: {
@@ -70,8 +70,8 @@ var profileConfig = {
     autoShutdown:        true
     diskType:            'Premium_LRS'
     deployPyRITVM:       false
-    publicIP:            true
-    description:         'Home Pre-prod — D8s_v3, mistral:7b, SSH tunnel from laptop'
+    publicIP:            false               // corporate — BeyondTrust private routing
+    description:         'Corp Pre-prod — D8s_v3, mistral:7b, BeyondTrust access'
   }
   production: {
     llamafirewallVMSize: 'Standard_D16s_v3'
@@ -80,8 +80,8 @@ var profileConfig = {
     autoShutdown:        false
     diskType:            'Premium_LRS'
     deployPyRITVM:       false
-    publicIP:            true
-    description:         'Home Production — D16s_v3, llama3:8b, SSH tunnel from laptop'
+    publicIP:            false               // corporate — BeyondTrust private routing
+    description:         'Corp Production — D16s_v3, llama3:8b, BeyondTrust access'
   }
   'corp-lab': {
     llamafirewallVMSize: 'Standard_NC4as_T4_v3'  // GPU — requires quota approval
@@ -90,7 +90,7 @@ var profileConfig = {
     autoShutdown:        true
     diskType:            'Premium_LRS'
     deployPyRITVM:       true                     // deploys a second VM for PyRIT
-    publicIP:            true                     // set false if BeyondTrust uses private routing
+    publicIP:            false                    // no public IP — BeyondTrust uses private routing
     description:         'Corp Lab — NC4as T4 GPU + PyRIT VM, BeyondTrust access, sandbox VNet'
   }
 }
@@ -529,19 +529,19 @@ output vmPublicIP string = cfg.publicIP ? lfPIP.properties.ipAddress : 'no-publi
 output vmFQDN string = cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'
 
 @description('SSH connect command — LlamaFirewall VM.')
-output sshCommand string = 'ssh ${adminUsername}@${cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'}'
+output sshCommand string = 'ssh ${adminUsername}@${cfg.publicIP ? (lfPIP.properties.dnsSettings.fqdn ?? 'no-public-ip') : 'no-public-ip'}'
 
 @description('SSH tunnel command (home profiles only).')
-output sshTunnelCommand string = 'ssh -N -L 8080:localhost:8080 ${adminUsername}@${cfg.publicIP ? lfPIP.properties.dnsSettings.fqdn : 'no-public-ip'}'
+output sshTunnelCommand string = 'ssh -N -L 8080:localhost:8080 ${adminUsername}@${cfg.publicIP ? (lfPIP.properties.dnsSettings.fqdn ?? 'no-public-ip') : 'no-public-ip'}'
 
 @description('PyRIT VM public IP (corp-lab only).')
-output pyritVMPublicIP string = (cfg.deployPyRITVM && cfg.publicIP) ? pyritPIP.properties.ipAddress : 'n/a'
+output pyritVMPublicIP string = (cfg.deployPyRITVM && cfg.publicIP) ? (pyritPIP.properties.ipAddress ?? 'n/a') : 'n/a'
 
 @description('PyRIT VM FQDN (corp-lab only).')
-output pyritVMFQDN string = (cfg.deployPyRITVM && cfg.publicIP) ? pyritPIP.properties.dnsSettings.fqdn : 'n/a'
+output pyritVMFQDN string = (cfg.deployPyRITVM && cfg.publicIP) ? (pyritPIP.properties.dnsSettings.fqdn ?? 'n/a') : 'n/a'
 
 @description('SSH connect command — PyRIT VM (corp-lab only).')
-output pyritSSHCommand string = (cfg.deployPyRITVM && cfg.publicIP) ? 'ssh ${adminUsername}@${pyritPIP.properties.dnsSettings.fqdn}' : 'n/a'
+output pyritSSHCommand string = (cfg.deployPyRITVM && cfg.publicIP) ? 'ssh ${adminUsername}@${pyritPIP.properties.dnsSettings.fqdn ?? 'n/a'}' : 'n/a'
 
 @description('LlamaFirewall VM private IP — use this from the PyRIT VM (corp-lab).')
 output llamafirewallPrivateIP string = lfNIC.properties.ipConfigurations[0].properties.privateIPAddress
