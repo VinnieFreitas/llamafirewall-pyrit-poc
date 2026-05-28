@@ -45,6 +45,42 @@ read -rp "Continue with this subscription? [y/N] " CONFIRM
 [[ "${CONFIRM,,}" == "y" ]] || { echo "Aborted."; exit 0; }
 
 # ---------------------------------------------------------------------------
+#  Region selection
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "============================================================"
+echo "  Select Azure region:"
+echo "============================================================"
+echo ""
+echo "  1) eastus       — East US        (lowest cost)"
+echo "  2) brazilsouth  — Brazil South   (lowest latency from São Paulo)"
+echo "  3) westeurope   — West Europe"
+echo "  4) other        — Enter manually"
+echo ""
+read -rp "Enter region [1/2/3/4] (default: 1): " REGION_CHOICE
+
+case "${REGION_CHOICE}" in
+  2) SELECTED_REGION="brazilsouth" ;;
+  3) SELECTED_REGION="westeurope"  ;;
+  4)
+    read -rp "Enter Azure region name: " SELECTED_REGION
+    ;;
+  *) SELECTED_REGION="eastus"      ;;
+esac
+
+echo ""
+echo "==> Selected region: ${SELECTED_REGION}"
+echo ""
+
+# Update main.bicepparam with the selected region
+sed -i "s/^param location = .*/param location = '${SELECTED_REGION}'/" \
+    "${SCRIPT_DIR}/main.bicepparam"
+
+# Also update the script-level LOCATION variable used for resource group creation
+LOCATION="${SELECTED_REGION}"
+
+# ---------------------------------------------------------------------------
 #  Environment profile selection
 # ---------------------------------------------------------------------------
 
@@ -129,6 +165,7 @@ if [[ "${PROFILE}" == "corp-lab" ]]; then
     echo "        IdentityFile ${CORP_KEY}"
     echo "        User azureuser"
     echo ""
+    read -rp "  Press Enter to continue with deployment..." _PAUSE
 fi
 
 # Update main.bicepparam with the selected profile
