@@ -4,7 +4,7 @@
     {
       "type": 1,
       "content": {
-        "json": "# \ud83d\udd10 LlamaFirewall Security Dashboard\n**PoC**: Self-hosted LLM \u2192 LlamaFirewall proxy \u2192 PyRIT red-team \u2192 Log Analytics\n\n---\n\nThis workbook shows the results of automated adversarial testing (PyRIT) against the LlamaFirewall-protected Phi-3-mini LLM running on Azure. Use the time range picker to filter by session."
+        "json": "# \ud83d\udd12 LlamaFirewall Security Dashboard\n**PoC**: Self-hosted LLM \u2192 LlamaFirewall proxy \u2192 PyRIT red-team \u2192 Log Analytics\n\n---\n\nThis workbook shows the results of automated adversarial testing (PyRIT) against the LlamaFirewall-protected LLM running on Azure. Use the time range picker to filter by session."
       },
       "name": "header"
     },
@@ -51,12 +51,61 @@
       "name": "parameters"
     },
     {
+      "type": 1,
+      "content": {
+        "json": "## \ud83d\udcca Dataset & Stack Overview"
+      },
+      "name": "stats_header"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "| | Custom Attacks (PT-BR) | Gandalf Dataset (EN) |\n|---|---|---|\n| **Total prompts** | 87 | 60 |\n| **Language** | Brazilian Portuguese | English |\n| **Source** | Hand-crafted adversarial dataset | Lakera Gandalf (3 HuggingFace datasets) |\n| **Detection rate** | **98.85%** | **70%** |\n| **Categories** | 10 | 3 |\n\n| | Value |\n|---|---|\n| **Scanner layers** | 6 |\n| **NOVA rules** | 10 |\n| **PromptGuard threshold** | 0.05 (lab) \u00b7 0.10 (preprod) \u00b7 0.15 (prod) |\n| **LlamaGuard model** | llama-guard3:8b |\n| **LLM model** | phi3:mini (lab) \u00b7 mistral:7b (preprod) \u00b7 llama3:8b (prod) |"
+      },
+      "customWidth": "60",
+      "name": "dataset_stats"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange}\n| summarize\n    TotalRuns    = dcount(run_timestamp_s),\n    LastRun      = max(TimeGenerated),\n    TotalPrompts = count(),\n    PassRate     = round(100.0 * countif(outcome_s == \"PASS\") / count(), 1)\n| project\n    ['Total Runs']      = TotalRuns,\n    ['Last Run']        = LastRun,\n    ['Total Prompts']   = TotalPrompts,\n    ['Avg Pass Rate %'] = PassRate",
+        "size": 4,
+        "title": "Session History",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": {
+            "columnMatch": "column",
+            "formatter": 1
+          },
+          "leftContent": {
+            "columnMatch": "value",
+            "formatter": 12
+          },
+          "showBorder": true,
+          "size": "auto"
+        }
+      },
+      "customWidth": "40",
+      "name": "session_history"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "## \ud83c\udfaf Session Overview"
+      },
+      "name": "session_header"
+    },
+    {
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
         "query": "let data = PyRITResults_CL | where TimeGenerated {TimeRange};\nunion\n  (data | summarize Value = todouble(count())             | extend Metric = \"Total Attacks\"),\n  (data | summarize Value = round(100.0 * countif(outcome_s == \"PASS\") / count(), 1) | extend Metric = \"Pass Rate (%)\"),\n  (data | summarize Value = todouble(countif(blocked_b == true))  | extend Metric = \"Blocked by Firewall\"),\n  (data | summarize Value = todouble(countif(outcome_s == \"FAIL\")) | extend Metric = \"False Negatives\")\n| project Metric, Value",
         "size": 4,
-        "title": "Session Overview",
+        "title": "Latest Run Stats",
         "timeContextFromParameter": "TimeRange",
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -259,9 +308,9 @@
     {
       "type": 1,
       "content": {
-        "json": "## \ud83d\uddfa\ufe0f Production Hardening Roadmap\n\n**Current detection rate: 98.85%** across 87 adversarial prompts (+55.17% from single-scanner baseline).\n\n**Implemented scanner stack (6 layers):**\n\n| Layer | Scanner | Type | Catches |\n|---|---|---|---|\n| \u2705 1 | PromptGuard 2 (threshold 0.05) | ML classifier | Injection syntax, jailbreaks |\n| \u2705 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding |\n| \u2705 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |\n| \u2705 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |\n| \u2705 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |\n\n**Remaining production additions:**\n\n| Gap | Recommended Fix |\n|---|---|\n| Output scanning (responses not yet scanned) | Enable LlamaGuard 3 on `Role.ASSISTANT` |\n| Inference latency (~23s/prompt on CPU) | GPU-enabled VM (NC-series T4) \u2192 ~1-2s/prompt |\n| NOVA LLM tier disabled | Replace phi3:mini with dedicated safety classifier on GPU |"
+        "json": "## \ud83d\udee1\ufe0f LlamaFirewall Scanner Stack\n\n6 layers run in order on every prompt. **ANY block = request blocked.**\n\n| Layer | Scanner | Type | Threshold / Config | Catches |\n|---|---|---|---|---|\n| 1 | **PromptGuard 2** | ML classifier | 0.05 (lab) \u00b7 0.10 (preprod) \u00b7 0.15 (prod) | Injection syntax, jailbreaks, DAN variants |\n| 2 | **HiddenASCII** | Rule-based | Block at score 1.0 | BiDi text, zero-width spaces, invisible chars, encoding tricks |\n| 3 | **Regex + CustomPatterns** | Rule-based | Block at score 1.0 | XSS, SQL injection, credential extraction, command injection, tool abuse |\n| 4 | **LlamaGuard 3:8B** | Semantic LLM | Timeout 120s \u00b7 fail-closed | Social engineering, content safety, subtle jailbreaks, coercion |\n| 5 | **NOVA** (10 rules) | YARA-style keyword+semantic | Fail-open | Logic traps, tool injection, system prompt extraction, bioweapon synthesis, political manipulation, capability fabrication |\n| 6 | **Output scan** *(preprod/prod only)* | LlamaGuard 3:8B | Same as layer 4 | Harmful content in LLM responses |\n\n**Datasets:**\n\n| Dataset | Prompts | Language | Detection rate | Categories |\n|---|---|---|---|---|\n| `custom_attacks.yaml` | 87 | Brazilian Portuguese | **98.85%** | 10 |\n| `gandalf_attacks.yaml` | 60 | English | **70%** | 3 (prompt_injection, indirect_injection, evasion) |\n\n**NOVA rules breakdown:**\n\n| Rule | Targets | Detection method |\n|---|---|---|\n| LogicTrapJailbreak | Logic paradox / prove-you-can't tricks | Keyword + semantic + LLM |\n| ToolCallInjectionInDocument | `<tool_call>` hidden in documents | Keyword |\n| SystemPromptExtraction | Dump/memory error fake framing | Keyword + LLM |\n| CapabilityFabrication | Fake internet/memory claims | Keyword + semantic |\n| PoliticalOpinionManipulation | Vote/election opinion requests | Keyword + semantic |\n| BioweaponSynthesisAcademicFraming | Ricin/toxin synthesis disguised as academic | Keyword + semantic |\n| AcrosticEncodingSecretExtraction | Acrostic, Morse code, character encoding | Keyword + semantic |\n| PostSummaryInjection | Instructions injected after document | Keyword + semantic |\n| PasswordTransformationExtraction | Rotate/base64/encode password tricks | Keyword + semantic |\n| FictionalFrameSecretExtraction | Parallel world / new password framing | Keyword + semantic |"
       },
-      "name": "roadmap"
+      "name": "stack_summary"
     }
   ],
   "isLocked": false,
