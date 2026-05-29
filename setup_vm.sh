@@ -314,6 +314,8 @@ ok "PromptGuard 2 cached at ${INSTALL_DIR}/.cache/huggingface"
 
 # =============================================================================
 #  9. SYSTEMD SERVICE
+#  Always rewrite the service file — even on re-runs — so profile changes
+#  (bind address, thresholds, output scan) take effect immediately.
 # =============================================================================
 # Bind address — home-lab uses 127.0.0.1 (SSH tunnel only)
 #                corp profiles use 0.0.0.0 (PyRIT VM reaches LF over VNet)
@@ -321,6 +323,11 @@ BIND_HOST="127.0.0.1"
 if [[ "${PROFILE}" != "lab" ]]; then
     BIND_HOST="0.0.0.0"
 fi
+
+log "Creating llamafirewall.service (profile: ${PROFILE}, bind: ${BIND_HOST})..."
+
+# Stop any running instance before rewriting the service file
+sudo systemctl stop llamafirewall 2>/dev/null || true
 
 sudo tee /etc/systemd/system/llamafirewall.service > /dev/null << SERVICE_EOF
 [Unit]

@@ -387,10 +387,22 @@ python3 log_shipper.py --mode live \
 
 ## Step 5 — Deploy Azure Workbook
 
+> ⚠️ **Requires Azure CLI (`az`)** — run from your laptop or Azure Cloud Shell.
+> Do NOT run from the PyRIT or LlamaFirewall VMs (no `az` installed there).
+
 ```bash
+# Home-lab — reads credentials from deploy-outputs.json
 source venv/bin/activate
 python3 deploy_workbook.py
+
+# Corp / Sentinel LAW — pass credentials directly (no deploy-outputs.json needed)
+# Cloud Shell: install httpx first: pip install httpx --user --quiet
+python3 deploy_workbook.py \
+  --workspace-id <sentinel-workspace-id> \
+  --resource-id /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>
 ```
+
+> Find your Sentinel workspace resource ID: Portal → Log Analytics workspaces → your workspace → Properties → Resource ID
 
 The workbook ID is persisted in `deploy-outputs.json` — re-running updates the
 existing workbook in-place without creating duplicates.
@@ -429,7 +441,18 @@ Two VMs in an isolated sandbox subscription. BeyondTrust for access, no SSH tunn
 1. NC-series quota approved in sandbox subscription — Portal → Subscriptions → Usage + quotas → Request increase (Standard NCASv3_T4 Family, minimum 4 vCPUs)
 2. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
 3. **Trusted Launch is automatically disabled** in Bicep for all corp profiles — required for NVIDIA GPU driver to bind correctly. Do not re-enable it.
-4. When connecting via Bastion, GitHub requires a Personal Access Token for git clone (password auth disabled) — generate at: github.com → Settings → Developer settings → Personal access tokens → repo scope
+4. **Register the StandardSecurityType feature** in the sandbox subscription — required for deploying VMs with Trusted Launch disabled. Run once per subscription:
+   ```bash
+   az feature register \
+     --namespace Microsoft.Compute \
+     --name UseStandardSecurityType
+   # Wait for state to show "Registered" (~1-2 minutes)
+   az feature show \
+     --namespace Microsoft.Compute \
+     --name UseStandardSecurityType \
+     --query properties.state
+   ```
+5. When connecting via Bastion, GitHub requires a Personal Access Token for git clone (password auth disabled) — generate at: github.com → Settings → Developer settings → Personal access tokens → repo scope
 
 **Deploy:**
 ```bash
