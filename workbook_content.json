@@ -4,28 +4,49 @@
     {
       "type": 1,
       "content": {
-        "json": "# 🔐 LlamaFirewall Security Dashboard\n**PoC**: Self-hosted LLM → LlamaFirewall proxy → PyRIT red-team → Log Analytics\n\n---\n\nThis workbook shows the results of automated adversarial testing (PyRIT) against the LlamaFirewall-protected Phi-3-mini LLM running on Azure. Use the time range picker to filter by session."
+        "json": "# \ud83d\udd10 LlamaFirewall Security Dashboard\n**PoC**: Self-hosted LLM \u2192 LlamaFirewall proxy \u2192 PyRIT red-team \u2192 Log Analytics\n\n---\n\nThis workbook shows the results of automated adversarial testing (PyRIT) against the LlamaFirewall-protected Phi-3-mini LLM running on Azure. Use the time range picker to filter by session."
       },
       "name": "header"
     },
     {
       "type": 9,
       "content": {
-        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "version": "KqlParameterItem/1.0",
-        "name": "TimeRange",
-        "label": "Time Range",
-        "type": 4,
-        "isRequired": true,
-        "value": { "durationMs": 604800000 },
-        "typeSettings": {
-          "selectableValues": [
-            { "durationMs": 3600000,    "text": "Last 1 hour"   },
-            { "durationMs": 86400000,   "text": "Last 24 hours" },
-            { "durationMs": 604800000,  "text": "Last 7 days"   },
-            { "durationMs": 2592000000, "text": "Last 30 days"  }
-          ]
-        }
+        "parameters": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time Range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 604800000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000,
+                  "text": "Last 1 hour"
+                },
+                {
+                  "durationMs": 86400000,
+                  "text": "Last 24 hours"
+                },
+                {
+                  "durationMs": 604800000,
+                  "text": "Last 7 days"
+                },
+                {
+                  "durationMs": 2592000000,
+                  "text": "Last 30 days"
+                }
+              ]
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0
       },
       "name": "parameters"
     },
@@ -41,13 +62,19 @@
         "resourceType": "microsoft.operationalinsights/workspaces",
         "visualization": "tiles",
         "tileSettings": {
-          "titleContent": { "columnMatch": "Metric", "formatter": 1 },
+          "titleContent": {
+            "columnMatch": "Metric",
+            "formatter": 1
+          },
           "leftContent": {
             "columnMatch": "Value",
             "formatter": 12,
             "numberFormat": {
               "unit": 17,
-              "options": { "style": "decimal", "maximumFractionDigits": 1 }
+              "options": {
+                "style": "decimal",
+                "maximumFractionDigits": 1
+              }
             }
           },
           "showBorder": true,
@@ -69,9 +96,18 @@
         "visualization": "barchart",
         "chartSettings": {
           "seriesLabelSettings": [
-            { "seriesName": "PASS",        "color": "green"  },
-            { "seriesName": "FAIL",        "color": "red"    },
-            { "seriesName": "INTERESTING", "color": "yellow" }
+            {
+              "seriesName": "PASS",
+              "color": "green"
+            },
+            {
+              "seriesName": "FAIL",
+              "color": "red"
+            },
+            {
+              "seriesName": "INTERESTING",
+              "color": "yellow"
+            }
           ]
         }
       },
@@ -91,9 +127,15 @@
         "visualization": "barchart",
         "chartSettings": {
           "xAxis": "attack_name_s",
-          "yAxis": [ "score_d" ],
+          "yAxis": [
+            "score_d"
+          ],
           "seriesLabelSettings": [
-            { "seriesName": "score_d", "label": "PromptGuard Score", "color": "blue" }
+            {
+              "seriesName": "score_d",
+              "label": "PromptGuard Score",
+              "color": "blue"
+            }
           ]
         }
       },
@@ -119,20 +161,45 @@
               "formatOptions": {
                 "thresholdsOptions": "colors",
                 "thresholdsGrid": [
-                  { "operator": "==", "thresholdValue": "PASS",        "representation": "green",  "text": "✓ PASS"        },
-                  { "operator": "==", "thresholdValue": "FAIL",        "representation": "red",    "text": "✗ FAIL"        },
-                  { "operator": "==", "thresholdValue": "INTERESTING", "representation": "yellow", "text": "⚠ INTERESTING" },
-                  { "operator": "Default", "thresholdValue": null,     "representation": "blue",   "text": "{0}"           }
+                  {
+                    "operator": "==",
+                    "thresholdValue": "PASS",
+                    "representation": "green",
+                    "text": "\u2713 PASS"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "FAIL",
+                    "representation": "red",
+                    "text": "\u2717 FAIL"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "INTERESTING",
+                    "representation": "yellow",
+                    "text": "\u26a0 INTERESTING"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0}"
+                  }
                 ]
               }
             },
             {
               "columnMatch": "Score",
               "formatter": 8,
-              "formatOptions": { "palette": "redGreen" },
+              "formatOptions": {
+                "palette": "redGreen"
+              },
               "numberFormat": {
                 "unit": 17,
-                "options": { "style": "decimal", "maximumFractionDigits": 4 }
+                "options": {
+                  "style": "decimal",
+                  "maximumFractionDigits": 4
+                }
               }
             },
             {
@@ -141,9 +208,24 @@
               "formatOptions": {
                 "thresholdsOptions": "colors",
                 "thresholdsGrid": [
-                  { "operator": "==", "thresholdValue": "true",  "representation": "redBright", "text": "🛑 Blocked" },
-                  { "operator": "==", "thresholdValue": "false", "representation": "green",     "text": "✓ Passed"  },
-                  { "operator": "Default", "thresholdValue": null, "representation": "blue",    "text": "{0}"       }
+                  {
+                    "operator": "==",
+                    "thresholdValue": "true",
+                    "representation": "redBright",
+                    "text": "\ud83d\uded1 Blocked"
+                  },
+                  {
+                    "operator": "==",
+                    "thresholdValue": "false",
+                    "representation": "green",
+                    "text": "\u2713 Passed"
+                  },
+                  {
+                    "operator": "Default",
+                    "thresholdValue": null,
+                    "representation": "blue",
+                    "text": "{0}"
+                  }
                 ]
               }
             }
@@ -155,7 +237,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## ⚠️ False Negatives\n\nPrompts that bypassed the firewall. With the current 6-layer stack, this section should show no data for recent runs (98.85% detection rate). Any entries here represent new attack patterns not yet covered by the ruleset."
+        "json": "## \u26a0\ufe0f False Negatives\n\nPrompts that bypassed the firewall. With the current 6-layer stack, this section should show no data for recent runs (98.85% detection rate). Any entries here represent new attack patterns not yet covered by the ruleset."
       },
       "name": "fn_header"
     },
@@ -166,7 +248,7 @@
         "query": "PyRITResults_CL\n| where TimeGenerated {TimeRange} and outcome_s == \"FAIL\"\n| project\n    Category,\n    Attack          = attack_name_s,\n    Score           = score_d,\n    Prompt_Preview  = prompt_preview_s\n| order by Score desc",
         "size": 0,
         "title": "False Negatives Detail",
-        "noDataMessage": "✅ No false negatives in the selected time range — all expected blocks were caught.",
+        "noDataMessage": "\u2705 No false negatives in the selected time range \u2014 all expected blocks were caught.",
         "timeContextFromParameter": "TimeRange",
         "queryType": 0,
         "resourceType": "microsoft.operationalinsights/workspaces",
@@ -177,7 +259,7 @@
     {
       "type": 1,
       "content": {
-        "json": "## 🗺️ Production Hardening Roadmap\n\n**Current detection rate: 98.85%** across 87 adversarial prompts (+55.17% from single-scanner baseline).\n\n**Implemented scanner stack (6 layers):**\n\n| Layer | Scanner | Type | Catches |\n|---|---|---|---|\n| ✅ 1 | PromptGuard 2 (threshold 0.05) | ML classifier | Injection syntax, jailbreaks |\n| ✅ 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding |\n| ✅ 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |\n| ✅ 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |\n| ✅ 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |\n\n**Remaining production additions:**\n\n| Gap | Recommended Fix |\n|---|---|\n| Output scanning (responses not yet scanned) | Enable LlamaGuard 3 on `Role.ASSISTANT` |\n| Inference latency (~23s/prompt on CPU) | GPU-enabled VM (NC-series T4) → ~1-2s/prompt |\n| NOVA LLM tier disabled | Replace phi3:mini with dedicated safety classifier on GPU |"
+        "json": "## \ud83d\uddfa\ufe0f Production Hardening Roadmap\n\n**Current detection rate: 98.85%** across 87 adversarial prompts (+55.17% from single-scanner baseline).\n\n**Implemented scanner stack (6 layers):**\n\n| Layer | Scanner | Type | Catches |\n|---|---|---|---|\n| \u2705 1 | PromptGuard 2 (threshold 0.05) | ML classifier | Injection syntax, jailbreaks |\n| \u2705 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding |\n| \u2705 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |\n| \u2705 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |\n| \u2705 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |\n\n**Remaining production additions:**\n\n| Gap | Recommended Fix |\n|---|---|\n| Output scanning (responses not yet scanned) | Enable LlamaGuard 3 on `Role.ASSISTANT` |\n| Inference latency (~23s/prompt on CPU) | GPU-enabled VM (NC-series T4) \u2192 ~1-2s/prompt |\n| NOVA LLM tier disabled | Replace phi3:mini with dedicated safety classifier on GPU |"
       },
       "name": "roadmap"
     }
