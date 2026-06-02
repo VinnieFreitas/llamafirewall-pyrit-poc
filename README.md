@@ -411,7 +411,126 @@ existing workbook in-place without creating duplicates.
 
 ---
 
-## Bypass Mode — Incident Response
+## Prompt Logging to Sentinel
+
+LlamaFirewall can ship the **full prompt text** of every request to a dedicated
+`LlamaFirewallPrompts_CL` table in your Sentinel LAW. This table is kept separate
+from the general `LlamaFirewallEvents_CL` table and restricted to incident
+investigators via table-level RBAC.
+
+**Use cases:**
+- Incident investigation — a user complains their query was blocked; you see exactly what they sent
+- Threat hunting — a malicious prompt was allowed; you need the full text for analysis
+- Compliance audit — full record of what the LLM gateway received
+
+> ⚠️ **Data governance note:** Full prompts may contain PII (CPF, names, account numbers).
+> Always configure table-level RBAC before enabling in production.
+> In lab/corp-lab, prompts are synthetic attack data — PII redaction is optional.
+
+---
+
+### Step 1 — Restrict access to LlamaFirewallPrompts_CL in LAW
+
+**Portal → Sentinel LAW → Access control (IAM) → Add role assignment**
+
+1. Create a custom role allowing only `LlamaFirewallPrompts_CL`:
+```json
+{
+  "Name": "LlamaFirewall Prompt Investigator",
+  "Actions": [
+    "Microsoft.OperationalInsights/workspaces/read",
+    "Microsoft.OperationalInsights/workspaces/query/read"
+  ],
+  "DataActions": [
+    "Microsoft.OperationalInsights/workspaces/query/LlamaFirewallPrompts_CL/read"
+  ]
+}
+```
+
+2. Assign the role to your incident investigator security group (1-2 groups max)
+3. Verify general Sentinel readers **cannot** query `LlamaFirewallPrompts_CL`
+
+---
+
+### Step 2 — Enable prompt logging on the LlamaFirewall VM
+
+```bash
+# Enable prompt logging
+sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
+sudo systemctl set-environment LAW_WORKSPACE_ID=<your-sentinel-workspace-id>
+sudo systemctl set-environment LAW_WORKSPACE_KEY=<your-sentinel-primary-key>
+sudo systemctl restart llamafirewall
+
+# Verify it's enabled
+curl -sf http://localhost:8080/health | python3 -m json.tool
+# → "prompt_logging": true
+```
+
+---
+
+### Step 3 — Enable PII redaction (production only)
+
+In production, enable redaction via Azure AI Language before prompts land in LAW:
+
+```bash
+sudo systemctl set-environment PII_REDACTION_ENABLED=1
+sudo systemctl set-environment AZURE_LANGUAGE_ENDPOINT=https://<your-resource>.cognitiveservices.azure.com
+sudo systemctl set-environment AZURE_LANGUAGE_KEY=<your-language-key>
+sudo systemctl restart llamafirewall
+```
+
+The API masks detected PII entities (CPF, names, emails, phone numbers, account numbers)
+with `*` characters before the prompt is shipped to LAW. The original unredacted prompt
+remains in VM journald only.
+
+> PII redaction is **fail-open** — if the API is unavailable, the prompt ships as-is
+> rather than blocking the request. For stricter control, set `PII_REDACTION_ENABLED=1`
+> alongside a Sentinel Analytics Rule that alerts on `pii_redacted: false` records.
+
+---
+
+### Step 4 — Query prompts in Sentinel
+
+```kusto
+// All prompts in the last 24 hours
+LlamaFirewallPrompts_CL
+| where TimeGenerated > ago(24h)
+| project TimeGenerated, request_id_s, scan_decision_s, blocked_b,
+          scan_score_d, full_prompt_s
+| order by TimeGenerated desc
+
+// Blocked prompts only — for threat hunting
+LlamaFirewallPrompts_CL
+| where TimeGenerated > ago(7d) and blocked_b == true
+| project TimeGenerated, scan_decision_s, scan_reason_s,
+          scan_score_d, full_prompt_s
+| order by scan_score_d desc
+
+// Investigate a specific request by ID
+LlamaFirewallPrompts_CL
+| where request_id_s == "<request-id-from-user-complaint>"
+| project TimeGenerated, full_prompt_s, scan_decision_s,
+          scan_reason_s, scan_score_d, pii_redacted_b
+```
+
+---
+
+### AKS / production — env vars via Kubernetes Secret
+
+In production (AKS pod), set via Kubernetes Secret instead of systemd:
+
+```bash
+kubectl create secret generic llamafirewall-prompt-logging \
+  --namespace llamafirewall \
+  --from-literal=PROMPT_LOGGING_ENABLED=1 \
+  --from-literal=LAW_WORKSPACE_ID=<id> \
+  --from-literal=LAW_WORKSPACE_KEY=<key> \
+  --from-literal=PII_REDACTION_ENABLED=1 \
+  --from-literal=AZURE_LANGUAGE_ENDPOINT=<endpoint> \
+  --from-literal=AZURE_LANGUAGE_KEY=<key>
+```
+
+---
 
 When legitimate traffic is being dropped by LlamaFirewall, enable bypass mode.
 The proxy stays running — no network changes needed. All bypassed requests are

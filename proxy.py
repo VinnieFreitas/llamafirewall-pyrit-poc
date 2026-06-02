@@ -438,6 +438,148 @@ NO_LLM = os.environ.get("NO_LLM", "0").strip() == "1"
 if NO_LLM:
     logger.info("NO_LLM mode enabled — Ollama will be bypassed for allowed prompts.")
 
+# ---------------------------------------------------------------------------
+#  PROMPT LOGGING TO SENTINEL LAW
+#
+#  Ships full prompt text + scan decision to a tightly-controlled
+#  LlamaFirewallPrompts_CL table in Log Analytics.
+#
+#  Access to this table MUST be restricted via table-level RBAC in LAW
+#  to incident investigators only — see README for IAM setup.
+#
+#  PII redaction (optional, production only):
+#    When PII_REDACTION_ENABLED=1 and AZURE_LANGUAGE_ENDPOINT is set,
+#    the prompt is passed through Azure AI Language PII detection API
+#    before being shipped to LAW. All detected PII is masked with *.
+#    In lab/corp-lab, leave disabled — prompts are synthetic attack data.
+#
+#  Enable:
+#    sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
+#    sudo systemctl set-environment LAW_WORKSPACE_ID=<your-workspace-id>
+#    sudo systemctl set-environment LAW_WORKSPACE_KEY=<your-primary-key>
+#    sudo systemctl restart llamafirewall
+# ---------------------------------------------------------------------------
+
+import base64
+import hashlib
+import hmac
+
+PROMPT_LOGGING_ENABLED   = os.environ.get("PROMPT_LOGGING_ENABLED",  "0").strip() == "1"
+LAW_WORKSPACE_ID         = os.environ.get("LAW_WORKSPACE_ID",         "").strip()
+LAW_WORKSPACE_KEY        = os.environ.get("LAW_WORKSPACE_KEY",         "").strip()
+PII_REDACTION_ENABLED    = os.environ.get("PII_REDACTION_ENABLED",    "0").strip() == "1"
+AZURE_LANGUAGE_ENDPOINT  = os.environ.get("AZURE_LANGUAGE_ENDPOINT",  "").strip()
+AZURE_LANGUAGE_KEY       = os.environ.get("AZURE_LANGUAGE_KEY",       "").strip()
+
+if PROMPT_LOGGING_ENABLED:
+    if not LAW_WORKSPACE_ID or not LAW_WORKSPACE_KEY:
+        logger.warning("PROMPT_LOGGING_ENABLED=1 but LAW_WORKSPACE_ID/KEY not set — prompt logging disabled.")
+        PROMPT_LOGGING_ENABLED = False
+    else:
+        logger.info(f"Prompt logging ENABLED → LlamaFirewallPrompts_CL | PII redaction: {PII_REDACTION_ENABLED}")
+
+
+async def _redact_pii(text: str) -> str:
+    """
+    Call Azure AI Language PII detection API to redact sensitive entities.
+    Returns redacted text. Falls back to original on error (fail-open — never block a prompt
+    just because PII redaction failed).
+    Only called when PII_REDACTION_ENABLED=1 and AZURE_LANGUAGE_ENDPOINT is set.
+    """
+    if not PII_REDACTION_ENABLED or not AZURE_LANGUAGE_ENDPOINT or not AZURE_LANGUAGE_KEY:
+        return text
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{AZURE_LANGUAGE_ENDPOINT}/language/:analyze-text?api-version=2023-04-01",
+                headers={
+                    "Ocp-Apim-Subscription-Key": AZURE_LANGUAGE_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "kind": "PiiEntityRecognition",
+                    "analysisInput": {
+                        "documents": [{"id": "1", "language": "pt", "text": text}]
+                    },
+                    "parameters": {"modelVersion": "latest"},
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                redacted = data["results"]["documents"][0].get("redactedText", text)
+                return redacted
+    except Exception as e:
+        logger.warning(f"PII redaction error (fail-open): {e}")
+    return text
+
+
+async def _ship_prompt_to_law(
+    request_id: str,
+    prompt: str,
+    full_messages: list,
+    scan_decision: str,
+    scan_score: float,
+    scan_reason: str,
+    blocked: bool,
+    latency_ms: float,
+):
+    """
+    Ship full prompt + scan decision to LlamaFirewallPrompts_CL in LAW.
+    This table must have table-level RBAC restricting access to
+    incident investigators only.
+    Runs as a background task — never blocks the request path.
+    """
+    if not PROMPT_LOGGING_ENABLED:
+        return
+
+    try:
+        # Apply PII redaction if enabled (production only)
+        prompt_to_log = await _redact_pii(prompt)
+
+        record = [{
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
+            "request_id":      request_id,
+            "profile":         PROFILE,
+            "full_prompt":     prompt_to_log,
+            "prompt_length":   len(prompt),
+            "message_count":   len(full_messages),
+            "scan_decision":   scan_decision,
+            "scan_score":      round(scan_score, 4),
+            "scan_reason":     scan_reason[:500] if scan_reason else "",
+            "blocked":         blocked,
+            "latency_ms":      round(latency_ms, 1),
+            "pii_redacted":    PII_REDACTION_ENABLED,
+        }]
+
+        body         = json.dumps(record).encode("utf-8")
+        rfc1123_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        string_to_hash = f"POST\n{len(body)}\napplication/json\nx-ms-date:{rfc1123_date}\n/api/logs"
+        sig = base64.b64encode(
+            hmac.new(
+                base64.b64decode(LAW_WORKSPACE_KEY),
+                string_to_hash.encode("utf-8"),
+                digestmod=hashlib.sha256,
+            ).digest()
+        ).decode("utf-8")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"https://{LAW_WORKSPACE_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01",
+                content=body,
+                headers={
+                    "Content-Type":  "application/json",
+                    "Log-Type":      "LlamaFirewallPrompts",
+                    "x-ms-date":     rfc1123_date,
+                    "Authorization": f"SharedKey {LAW_WORKSPACE_ID}:{sig}",
+                    "time-generated-field": "timestamp",
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Prompt log ship failed: HTTP {resp.status_code}")
+
+    except Exception as e:
+        logger.warning(f"Prompt log ship error: {e}")
+
 app = FastAPI(title="LlamaFirewall Proxy", version="0.1.0")
 
 # ---------------------------------------------------------------------------
@@ -545,9 +687,13 @@ async def chat_completions(request: Request):
             logger.info(f"NOVA blocked prompt — rule: {nova_rule}")
 
     if blocked:
+        latency = (time.monotonic() - t_start) * 1000
         emit_security_log(request_id, user_prompt, scan_decision, scan_score,
-                          True, scan_reason,
-                          latency_ms=(time.monotonic() - t_start) * 1000)
+                          True, scan_reason, latency_ms=latency)
+        asyncio.create_task(_ship_prompt_to_law(
+            request_id, user_prompt, messages,
+            scan_decision, scan_score, scan_reason, True, latency
+        ))
         return JSONResponse(content={
             "id":      f"chatcmpl-{request_id}",
             "object":  "chat.completion",
@@ -643,6 +789,11 @@ async def chat_completions(request: Request):
     emit_security_log(request_id, user_prompt, scan_decision, scan_score,
                       False, scan_reason, response_text,
                       (time.monotonic() - t_start) * 1000)
+    asyncio.create_task(_ship_prompt_to_law(
+        request_id, user_prompt, messages,
+        scan_decision, scan_score, scan_reason, False,
+        (time.monotonic() - t_start) * 1000
+    ))
 
     ollama_body["x_llamafirewall"] = {
         "blocked":    False,
@@ -660,11 +811,13 @@ async def chat_completions(request: Request):
 @app.get("/health")
 async def health():
     return {
-        "status":        "ok",
-        "service":       "llamafirewall-proxy",
-        "profile":       PROFILE,
-        "pg_threshold":  BLOCK_THRESHOLD,
-        "output_scan":   OUTPUT_SCAN_ENABLED,
-        "bypass_mode":   BYPASS_MODE,
-        "scanners":      [] if BYPASS_MODE else active_scanners,
+        "status":           "ok",
+        "service":          "llamafirewall-proxy",
+        "profile":          PROFILE,
+        "pg_threshold":     BLOCK_THRESHOLD,
+        "output_scan":      OUTPUT_SCAN_ENABLED,
+        "bypass_mode":      BYPASS_MODE,
+        "prompt_logging":   PROMPT_LOGGING_ENABLED,
+        "pii_redaction":    PII_REDACTION_ENABLED,
+        "scanners":         [] if BYPASS_MODE else active_scanners,
     }

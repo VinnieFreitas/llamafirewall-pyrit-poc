@@ -349,6 +349,19 @@ Environment="OUTPUT_SCAN_ENABLED=${OUTPUT_SCAN}"
 Environment="NOVA_LLM_ENABLED=${NOVA_LLM}"
 Environment="LLAMA_GUARD_DISABLED=${LLAMA_GUARD_DISABLED}"
 
+# ---------------------------------------------------------------------------
+#  Prompt logging — ships full prompt to LlamaFirewallPrompts_CL in LAW.
+#  Disabled by default. Enable after configuring table-level RBAC in LAW.
+#  Set LAW_WORKSPACE_ID and LAW_WORKSPACE_KEY to your Sentinel workspace.
+#  See README: "Prompt Logging to Sentinel" for full setup instructions.
+# ---------------------------------------------------------------------------
+Environment="PROMPT_LOGGING_ENABLED=0"
+Environment="LAW_WORKSPACE_ID="
+Environment="LAW_WORKSPACE_KEY="
+Environment="PII_REDACTION_ENABLED=0"
+Environment="AZURE_LANGUAGE_ENDPOINT="
+Environment="AZURE_LANGUAGE_KEY="
+
 ExecStart=${INSTALL_DIR}/venv/bin/uvicorn proxy:app \
     --host ${BIND_HOST} \
     --port ${FIREWALL_PORT} \
