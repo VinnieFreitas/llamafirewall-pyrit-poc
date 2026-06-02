@@ -235,12 +235,28 @@ echo "  VM Public IP   : ${VM_IP}"
 echo "  VM FQDN        : ${VM_FQDN}"
 echo "  VM Private IP  : $(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('llamafirewallPrivateIP',{}).get('value','n/a'))" 2>/dev/null || echo "n/a")"
 echo ""
-if [[ "${VM_IP}" == "no-public-ip" ]]; then
-    echo "  ℹ️  No public IP — this is a corporate profile."
-    echo "     Access via BeyondTrust using the private IP above."
-    echo "     SSH connect: ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<private-ip>"
+
+INGESTION_METHOD=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('lawIngestionMethod',{}).get('value','shared_key'))" 2>/dev/null || echo "shared_key")
+echo "  LAW ingestion  : ${INGESTION_METHOD}"
+
+if [[ "${INGESTION_METHOD}" == "managed_identity" ]]; then
+    DCE_ENDPOINT=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('dceEndpoint',{}).get('value',''))" 2>/dev/null || echo "")
+    DCR_ID=$(echo "${DEPLOY_OUTPUT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('dcrImmutableId',{}).get('value',''))" 2>/dev/null || echo "")
+    echo "  DCE endpoint   : ${DCE_ENDPOINT}"
+    echo "  DCR ID         : ${DCR_ID}"
+    echo ""
+    echo "  ℹ️  Managed Identity — no workspace key needed."
+    echo "     Set DCE_ENDPOINT and DCR_IMMUTABLE_ID in the VM systemd service"
+    echo "     after running setup_vm.sh to enable prompt logging."
 else
-    echo "  SSH connect    : ${SSH_CMD}"
+    echo ""
+    if [[ "${VM_IP}" == "no-public-ip" ]]; then
+        echo "  ℹ️  No public IP — this is a corporate profile."
+        echo "     Access via BeyondTrust using the private IP above."
+        echo "     SSH connect: ssh -i ~/.ssh/id_ed25519_llamapoc_corp azureuser@<private-ip>"
+    else
+        echo "  SSH connect    : ${SSH_CMD}"
+    fi
 fi
 
 # corp-lab: also print PyRIT VM details

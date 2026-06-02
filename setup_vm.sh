@@ -68,6 +68,7 @@ case "${PROFILE}" in
         OUTPUT_SCAN="0"
         NOVA_LLM="0"
         LLAMA_GUARD_DISABLED="0"
+        PROFILE_LF_INGESTION="shared_key"
         ;;
     preprod)
         OLLAMA_MODEL="mistral:7b"
@@ -75,6 +76,7 @@ case "${PROFILE}" in
         OUTPUT_SCAN="1"
         NOVA_LLM="0"
         LLAMA_GUARD_DISABLED="0"
+        PROFILE_LF_INGESTION="managed_identity"
         ;;
     production)
         OLLAMA_MODEL="llama3:8b"
@@ -82,6 +84,7 @@ case "${PROFILE}" in
         OUTPUT_SCAN="1"
         NOVA_LLM="1"
         LLAMA_GUARD_DISABLED="0"
+        PROFILE_LF_INGESTION="managed_identity"
         ;;
     *)
         fail "Unknown profile '${PROFILE}'. Use: lab | preprod | production"
@@ -361,6 +364,16 @@ Environment="LAW_WORKSPACE_KEY="
 Environment="PII_REDACTION_ENABLED=0"
 Environment="AZURE_LANGUAGE_ENDPOINT="
 Environment="AZURE_LANGUAGE_KEY="
+
+# ---------------------------------------------------------------------------
+#  LAW ingestion method — set automatically based on profile
+#  lab/corp-lab:      shared_key (HMAC-SHA256 with workspace primary key)
+#  preprod/production: managed_identity (Entra ID token from IMDS, no keys)
+# ---------------------------------------------------------------------------
+Environment="LAW_INGESTION_METHOD=${PROFILE_LF_INGESTION}"
+Environment="DCE_ENDPOINT="
+Environment="DCR_IMMUTABLE_ID="
+Environment="DCR_STREAM_NAME=Custom-LlamaFirewallPrompts_CL"
 
 ExecStart=${INSTALL_DIR}/venv/bin/uvicorn proxy:app \
     --host ${BIND_HOST} \

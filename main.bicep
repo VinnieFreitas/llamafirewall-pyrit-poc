@@ -97,6 +97,11 @@ var profileConfig = {
 
 var cfg = profileConfig[profile]
 
+// Whether this profile uses Managed Identity for LAW ingestion
+// lab / corp-lab: Shared Key (simpler, fine for sandbox)
+// preprod / production: Managed Identity + DCR (zero-trust, no static keys)
+var useManagedIdentity = (profile == 'preprod' || profile == 'production')
+
 // Resource names — LlamaFirewall VM
 var lfVMName    = '${prefix}-lf-vm'
 var lfNICName   = '${prefix}-lf-nic'
@@ -112,6 +117,8 @@ var pyritDNSLabel = '${prefix}-pyrit'
 
 // Shared resources
 var lawName    = '${prefix}-law'
+var dceName    = '${prefix}-dce'
+var dcrName    = '${prefix}-dcr-prompts'
 var vnetName   = '${prefix}-vnet'
 var lfNSGName  = '${prefix}-lf-nsg'
 var pyritNSGName = '${prefix}-pyrit-nsg'
@@ -119,6 +126,10 @@ var pyritNSGName = '${prefix}-pyrit-nsg'
 // Subnets
 var lfSubnetName    = 'llamafirewall-subnet'
 var pyritSubnetName = 'pyrit-subnet'
+
+// Built-in role: Monitoring Metrics Publisher
+// Required for Managed Identity to ingest data via DCR
+var monitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
 
 // ---------------------------------------------------------------------------
 //  Log Analytics Workspace
@@ -136,6 +147,89 @@ resource law 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
     }
     publicNetworkAccessForIngestion: 'Enabled'
     publicNetworkAccessForQuery:     'Enabled'
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Data Collection Endpoint (DCE) — preprod/production only
+//  Required for DCR-based log ingestion via Managed Identity.
+//  Provides the ingestion URL that proxy.py posts to.
+// ---------------------------------------------------------------------------
+
+resource dce 'Microsoft.Insights/dataCollectionEndpoints@2022-06-01' = if (useManagedIdentity) {
+  name:     dceName
+  location: location
+  properties: {
+    networkAcls: {
+      publicNetworkAccess: 'Enabled'
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Data Collection Rule (DCR) — preprod/production only
+//  Defines the stream → LAW table mapping for LlamaFirewallPrompts_CL.
+//  The VM's Managed Identity must have Monitoring Metrics Publisher on this DCR.
+// ---------------------------------------------------------------------------
+
+resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = if (useManagedIdentity) {
+  name:     dcrName
+  location: location
+  properties: {
+    dataCollectionEndpointId: useManagedIdentity ? dce.id : null
+    streamDeclarations: {
+      'Custom-LlamaFirewallPrompts_CL': {
+        columns: [
+          { name: 'TimeGenerated',   type: 'datetime' }
+          { name: 'request_id',      type: 'string'   }
+          { name: 'profile',         type: 'string'   }
+          { name: 'full_prompt',     type: 'string'   }
+          { name: 'prompt_length',   type: 'int'      }
+          { name: 'message_count',   type: 'int'      }
+          { name: 'scan_decision',   type: 'string'   }
+          { name: 'scan_score',      type: 'real'     }
+          { name: 'scan_reason',     type: 'string'   }
+          { name: 'blocked',         type: 'boolean'  }
+          { name: 'latency_ms',      type: 'real'     }
+          { name: 'pii_redacted',    type: 'boolean'  }
+        ]
+      }
+    }
+    destinations: {
+      logAnalytics: [
+        {
+          workspaceResourceId: law.id
+          name:                'law-destination'
+        }
+      ]
+    }
+    dataFlows: [
+      {
+        streams:      [ 'Custom-LlamaFirewallPrompts_CL' ]
+        destinations: [ 'law-destination' ]
+        outputStream: 'Custom-LlamaFirewallPrompts_CL'
+        transformKql: 'source'
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Role assignment — Monitoring Metrics Publisher on DCR
+//  Grants the LlamaFirewall VM's System-Assigned Managed Identity permission
+//  to ingest data through the DCR.
+// ---------------------------------------------------------------------------
+
+resource dcrRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (useManagedIdentity) {
+  name:  guid(dcr.id, lfVM.id, monitoringMetricsPublisherRoleId)
+  scope: dcr
+  properties: {
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      monitoringMetricsPublisherRoleId
+    )
+    principalId:   lfVM.identity.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -358,6 +452,9 @@ resource pyritNIC 'Microsoft.Network/networkInterfaces@2023-04-01' = if (cfg.dep
 resource lfVM 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   name:     lfVMName
   location: location
+  // System-Assigned Managed Identity — preprod/production only
+  // Used for DCR-based LAW ingestion (no static keys stored anywhere)
+  identity: useManagedIdentity ? { type: 'SystemAssigned' } : null
   properties: {
     hardwareProfile: { vmSize: cfg.llamafirewallVMSize }
     // ---------------------------------------------------------------------------
@@ -567,3 +664,18 @@ output lawWorkspaceId string = law.properties.customerId
 
 @description('Log Analytics resource ID.')
 output lawResourceId string = law.id
+
+@description('Ingestion method — shared_key (lab/corp-lab) or managed_identity (preprod/production).')
+output lawIngestionMethod string = useManagedIdentity ? 'managed_identity' : 'shared_key'
+
+@description('DCE ingestion endpoint (preprod/production only).')
+output dceEndpoint string = useManagedIdentity ? dce.properties.logsIngestion.endpoint : 'n/a'
+
+@description('DCR immutable ID (preprod/production only).')
+output dcrImmutableId string = useManagedIdentity ? dcr.properties.immutableId : 'n/a'
+
+@description('DCR stream name for LlamaFirewallPrompts_CL.')
+output dcrStreamName string = useManagedIdentity ? 'Custom-LlamaFirewallPrompts_CL' : 'n/a'
+
+@description('LlamaFirewall VM Managed Identity principal ID (preprod/production only).')
+output lfVMManagedIdentityPrincipalId string = useManagedIdentity ? lfVM.identity.principalId : 'n/a'

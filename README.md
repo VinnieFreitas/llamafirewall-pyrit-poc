@@ -454,17 +454,44 @@ investigators via table-level RBAC.
 
 ### Step 2 — Enable prompt logging on the LlamaFirewall VM
 
+**Lab / corp-lab (Shared Key):**
 ```bash
-# Enable prompt logging
 sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
 sudo systemctl set-environment LAW_WORKSPACE_ID=<your-sentinel-workspace-id>
 sudo systemctl set-environment LAW_WORKSPACE_KEY=<your-sentinel-primary-key>
 sudo systemctl restart llamafirewall
 
-# Verify it's enabled
+# Verify
 curl -sf http://localhost:8080/health | python3 -m json.tool
-# → "prompt_logging": true
+# → "prompt_logging": true, "ingestion_method": "shared_key"
 ```
+
+**Preprod / production (Managed Identity — no keys):**
+
+The VM already has a System-Assigned Managed Identity and the DCR role assignment from the Bicep deployment. Get the DCE endpoint and DCR immutable ID from `deploy-outputs.json`:
+
+```bash
+cat deploy-outputs.json | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print('DCE:', d.get('dceEndpoint',{}).get('value'))
+print('DCR:', d.get('dcrImmutableId',{}).get('value'))
+"
+
+# On the LlamaFirewall VM:
+sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
+sudo systemctl set-environment DCE_ENDPOINT=<dce-endpoint>
+sudo systemctl set-environment DCR_IMMUTABLE_ID=<dcr-immutable-id>
+# LAW_INGESTION_METHOD=managed_identity is already set by setup_vm.sh for preprod/production
+sudo systemctl restart llamafirewall
+
+# Verify
+curl -sf http://localhost:8080/health | python3 -m json.tool
+# → "prompt_logging": true, "ingestion_method": "managed_identity"
+```
+
+> The Managed Identity token is fetched automatically from the Azure IMDS endpoint
+> (`169.254.169.254`) inside the VM. Tokens are cached and refreshed 5 minutes before
+> expiry. No credentials are stored anywhere.
 
 ---
 

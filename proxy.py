@@ -471,12 +471,67 @@ PII_REDACTION_ENABLED    = os.environ.get("PII_REDACTION_ENABLED",    "0").strip
 AZURE_LANGUAGE_ENDPOINT  = os.environ.get("AZURE_LANGUAGE_ENDPOINT",  "").strip()
 AZURE_LANGUAGE_KEY       = os.environ.get("AZURE_LANGUAGE_KEY",       "").strip()
 
+# ---------------------------------------------------------------------------
+#  LAW ingestion method — drives how proxy.py authenticates to LAW
+#  shared_key     : lab / corp-lab — HMAC-SHA256 with workspace primary key
+#  managed_identity: preprod / production — Entra ID token from IMDS, no keys
+# ---------------------------------------------------------------------------
+LAW_INGESTION_METHOD = os.environ.get("LAW_INGESTION_METHOD", "shared_key").strip()
+
+# DCR-based ingestion — preprod/production (managed_identity only)
+# Values come from deploy.sh outputs after deployment
+DCE_ENDPOINT   = os.environ.get("DCE_ENDPOINT",   "").strip()   # e.g. https://xxx.eastus.ingest.monitor.azure.com
+DCR_IMMUTABLE_ID = os.environ.get("DCR_IMMUTABLE_ID", "").strip() # e.g. dcr-xxx
+DCR_STREAM_NAME  = os.environ.get("DCR_STREAM_NAME",  "Custom-LlamaFirewallPrompts_CL").strip()
+
 if PROMPT_LOGGING_ENABLED:
-    if not LAW_WORKSPACE_ID or not LAW_WORKSPACE_KEY:
-        logger.warning("PROMPT_LOGGING_ENABLED=1 but LAW_WORKSPACE_ID/KEY not set — prompt logging disabled.")
-        PROMPT_LOGGING_ENABLED = False
-    else:
-        logger.info(f"Prompt logging ENABLED → LlamaFirewallPrompts_CL | PII redaction: {PII_REDACTION_ENABLED}")
+    if LAW_INGESTION_METHOD == "shared_key":
+        if not LAW_WORKSPACE_ID or not LAW_WORKSPACE_KEY:
+            logger.warning("PROMPT_LOGGING_ENABLED=1 (shared_key) but LAW_WORKSPACE_ID/KEY not set — prompt logging disabled.")
+            PROMPT_LOGGING_ENABLED = False
+        else:
+            logger.info(f"Prompt logging ENABLED → LlamaFirewallPrompts_CL via Shared Key | PII redaction: {PII_REDACTION_ENABLED}")
+    elif LAW_INGESTION_METHOD == "managed_identity":
+        if not DCE_ENDPOINT or not DCR_IMMUTABLE_ID:
+            logger.warning("PROMPT_LOGGING_ENABLED=1 (managed_identity) but DCE_ENDPOINT/DCR_IMMUTABLE_ID not set — prompt logging disabled.")
+            PROMPT_LOGGING_ENABLED = False
+        else:
+            logger.info(f"Prompt logging ENABLED → LlamaFirewallPrompts_CL via Managed Identity | PII redaction: {PII_REDACTION_ENABLED}")
+
+# ---------------------------------------------------------------------------
+#  Managed Identity token cache
+#  IMDS tokens are valid for up to 24h. We cache and refresh 5 min before expiry.
+# ---------------------------------------------------------------------------
+_mi_token_cache: dict = {"token": None, "expires_at": 0.0}
+
+async def _get_managed_identity_token() -> str:
+    """
+    Fetch an Entra ID token from the Azure IMDS endpoint.
+    Caches the token and refreshes 5 minutes before expiry.
+    Only valid inside an Azure VM with System-Assigned Managed Identity.
+    """
+    now = time.monotonic()
+    # Refresh if missing or expiring in < 5 minutes
+    if _mi_token_cache["token"] and now < _mi_token_cache["expires_at"] - 300:
+        return _mi_token_cache["token"]
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                "http://169.254.169.254/metadata/identity/oauth2/token",
+                params={
+                    "api-version": "2018-02-01",
+                    "resource":    "https://monitor.azure.com/",
+                },
+                headers={"Metadata": "true"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _mi_token_cache["token"]      = data["access_token"]
+            _mi_token_cache["expires_at"] = now + int(data.get("expires_in", 3600))
+            return _mi_token_cache["token"]
+    except Exception as e:
+        raise RuntimeError(f"Failed to get Managed Identity token from IMDS: {e}")
 
 
 async def _redact_pii(text: str) -> str:
@@ -525,57 +580,81 @@ async def _ship_prompt_to_law(
 ):
     """
     Ship full prompt + scan decision to LlamaFirewallPrompts_CL in LAW.
-    This table must have table-level RBAC restricting access to
-    incident investigators only.
+    Routes to shared key (lab/corp-lab) or Managed Identity DCR (preprod/prod).
     Runs as a background task — never blocks the request path.
     """
     if not PROMPT_LOGGING_ENABLED:
         return
 
     try:
-        # Apply PII redaction if enabled (production only)
         prompt_to_log = await _redact_pii(prompt)
 
         record = [{
-            "timestamp":       datetime.now(timezone.utc).isoformat(),
-            "request_id":      request_id,
-            "profile":         PROFILE,
-            "full_prompt":     prompt_to_log,
-            "prompt_length":   len(prompt),
-            "message_count":   len(full_messages),
-            "scan_decision":   scan_decision,
-            "scan_score":      round(scan_score, 4),
-            "scan_reason":     scan_reason[:500] if scan_reason else "",
-            "blocked":         blocked,
-            "latency_ms":      round(latency_ms, 1),
-            "pii_redacted":    PII_REDACTION_ENABLED,
+            "TimeGenerated": datetime.now(timezone.utc).isoformat(),
+            "request_id":    request_id,
+            "profile":       PROFILE,
+            "full_prompt":   prompt_to_log,
+            "prompt_length": len(prompt),
+            "message_count": len(full_messages),
+            "scan_decision": scan_decision,
+            "scan_score":    round(scan_score, 4),
+            "scan_reason":   scan_reason[:500] if scan_reason else "",
+            "blocked":       blocked,
+            "latency_ms":    round(latency_ms, 1),
+            "pii_redacted":  PII_REDACTION_ENABLED,
         }]
 
-        body         = json.dumps(record).encode("utf-8")
-        rfc1123_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-        string_to_hash = f"POST\n{len(body)}\napplication/json\nx-ms-date:{rfc1123_date}\n/api/logs"
-        sig = base64.b64encode(
-            hmac.new(
-                base64.b64decode(LAW_WORKSPACE_KEY),
-                string_to_hash.encode("utf-8"),
-                digestmod=hashlib.sha256,
-            ).digest()
-        ).decode("utf-8")
+        body = json.dumps(record).encode("utf-8")
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"https://{LAW_WORKSPACE_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01",
-                content=body,
-                headers={
-                    "Content-Type":  "application/json",
-                    "Log-Type":      "LlamaFirewallPrompts",
-                    "x-ms-date":     rfc1123_date,
-                    "Authorization": f"SharedKey {LAW_WORKSPACE_ID}:{sig}",
-                    "time-generated-field": "timestamp",
-                },
-            )
-            if resp.status_code != 200:
-                logger.warning(f"Prompt log ship failed: HTTP {resp.status_code}")
+        if LAW_INGESTION_METHOD == "managed_identity":
+            # ----------------------------------------------------------------
+            #  DCR-based ingestion via Managed Identity — preprod/production
+            #  No static keys. Token fetched from IMDS, cached up to 24h.
+            # ----------------------------------------------------------------
+            token = await _get_managed_identity_token()
+            url   = (f"{DCE_ENDPOINT}/dataCollectionRules/{DCR_IMMUTABLE_ID}"
+                     f"/streams/{DCR_STREAM_NAME}?api-version=2023-01-01")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    url,
+                    content=body,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type":  "application/json",
+                    },
+                )
+                if resp.status_code not in (200, 204):
+                    logger.warning(f"Prompt log (managed_identity) failed: HTTP {resp.status_code} — {resp.text[:100]}")
+
+        else:
+            # ----------------------------------------------------------------
+            #  Shared Key ingestion — lab/corp-lab
+            #  HMAC-SHA256 signature using workspace primary key.
+            # ----------------------------------------------------------------
+            rfc1123_date   = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+            string_to_hash = f"POST\n{len(body)}\napplication/json\nx-ms-date:{rfc1123_date}\n/api/logs"
+            sig = base64.b64encode(
+                hmac.new(
+                    base64.b64decode(LAW_WORKSPACE_KEY),
+                    string_to_hash.encode("utf-8"),
+                    digestmod=hashlib.sha256,
+                ).digest()
+            ).decode("utf-8")
+            url = f"https://{LAW_WORKSPACE_ID}.ods.opinsights.azure.com/api/logs?api-version=2016-04-01"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    url,
+                    content=body,
+                    headers={
+                        "Content-Type":  "application/json",
+                        "Log-Type":      "LlamaFirewallPrompts",
+                        "x-ms-date":     rfc1123_date,
+                        "Authorization": f"SharedKey {LAW_WORKSPACE_ID}:{sig}",
+                        "time-generated-field": "TimeGenerated",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"Prompt log (shared_key) failed: HTTP {resp.status_code}")
 
     except Exception as e:
         logger.warning(f"Prompt log ship error: {e}")
