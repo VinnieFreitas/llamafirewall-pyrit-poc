@@ -53,17 +53,19 @@ echo "============================================================"
 echo "  Select Azure region:"
 echo "============================================================"
 echo ""
-echo "  1) eastus       — East US        (lowest cost)"
-echo "  2) brazilsouth  — Brazil South   (lowest latency from São Paulo)"
-echo "  3) westeurope   — West Europe"
-echo "  4) other        — Enter manually"
+echo "  1) eastus       — East US          (lowest cost)"
+echo "  2) eastus2      — East US 2        (paired with East US, good redundancy)"
+echo "  3) brazilsouth  — Brazil South     (lowest latency from São Paulo)"
+echo "  4) westeurope   — West Europe"
+echo "  5) other        — Enter manually"
 echo ""
-read -rp "Enter region [1/2/3/4] (default: 1): " REGION_CHOICE
+read -rp "Enter region [1/2/3/4/5] (default: 1): " REGION_CHOICE
 
 case "${REGION_CHOICE}" in
-  2) SELECTED_REGION="brazilsouth" ;;
-  3) SELECTED_REGION="westeurope"  ;;
-  4)
+  2) SELECTED_REGION="eastus2"     ;;
+  3) SELECTED_REGION="brazilsouth" ;;
+  4) SELECTED_REGION="westeurope"  ;;
+  5)
     read -rp "Enter Azure region name: " SELECTED_REGION
     ;;
   *) SELECTED_REGION="eastus"      ;;

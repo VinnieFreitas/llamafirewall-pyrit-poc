@@ -35,7 +35,9 @@ param beyondTrustSourceCIDR = '*'
 
 param prefix   = 'llamapoc'
 
-// eastus = cheapest; brazilsouth = lowest latency from São Paulo
+// eastus  = cheapest
+// eastus2 = paired with East US, good redundancy
+// brazilsouth = lowest latency from São Paulo
 param location = 'eastus'
 
 // Auto-shutdown in UTC (lab, preprod, corp-lab only)
