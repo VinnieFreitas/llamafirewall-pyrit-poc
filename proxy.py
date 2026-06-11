@@ -577,6 +577,8 @@ async def _ship_prompt_to_law(
     scan_reason: str,
     blocked: bool,
     latency_ms: float,
+    user_id: str = "",
+    source: str = "user_input",
 ):
     """
     Ship full prompt + scan decision to LlamaFirewallPrompts_CL in LAW.
@@ -592,6 +594,8 @@ async def _ship_prompt_to_law(
         record = [{
             "TimeGenerated": datetime.now(timezone.utc).isoformat(),
             "request_id":    request_id,
+            "user_id":       user_id,
+            "source":        source,
             "profile":       PROFILE,
             "full_prompt":   prompt_to_log,
             "prompt_length": len(prompt),
@@ -666,10 +670,13 @@ app = FastAPI(title="LlamaFirewall Proxy", version="0.1.0")
 # ---------------------------------------------------------------------------
 
 def emit_security_log(request_id, prompt, scan_decision, scan_score,
-                      blocked, scan_reason="", response_text="", latency_ms=0.0):
+                      blocked, scan_reason="", response_text="", latency_ms=0.0,
+                      user_id="", source="user_input"):
     logger.info("security_event", extra={
         "event_type":      "llm_request",
         "request_id":      request_id,
+        "user_id":         user_id,
+        "source":          source,
         "blocked":         blocked,
         "scan_decision":   scan_decision,
         "scan_score":      round(scan_score, 4),
@@ -693,6 +700,17 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
+
+    # ---------------------------------------------------------------------------
+    #  Extended fields — passed by NestJS backend for audit correlation
+    #  user_id : Entra ID UPN or OID of the authenticated user
+    #            Required for Sentinel audit trail and per-user anomaly detection
+    #  source  : "user_input" (default) or "rag_chunk"
+    #            "rag_chunk" = LlamaFirewall called from SearchHandler.execute()
+    #            to inspect a RAG chunk before it's returned as tool_result
+    # ---------------------------------------------------------------------------
+    user_id = body.get("user_id", "").strip()
+    source  = body.get("source",  "user_input").strip() or "user_input"
 
     # ------------------------------------------------------------------
     #  BYPASS MODE — skip all scanning, forward directly to Ollama
@@ -768,10 +786,12 @@ async def chat_completions(request: Request):
     if blocked:
         latency = (time.monotonic() - t_start) * 1000
         emit_security_log(request_id, user_prompt, scan_decision, scan_score,
-                          True, scan_reason, latency_ms=latency)
+                          True, scan_reason, latency_ms=latency,
+                          user_id=user_id, source=source)
         asyncio.create_task(_ship_prompt_to_law(
             request_id, user_prompt, messages,
-            scan_decision, scan_score, scan_reason, True, latency
+            scan_decision, scan_score, scan_reason, True, latency,
+            user_id=user_id, source=source
         ))
         return JSONResponse(content={
             "id":      f"chatcmpl-{request_id}",
@@ -795,7 +815,8 @@ async def chat_completions(request: Request):
     if NO_LLM:
         emit_security_log(request_id, user_prompt, scan_decision, scan_score,
                           False, scan_reason, "[stub — NO_LLM mode]",
-                          (time.monotonic() - t_start) * 1000)
+                          (time.monotonic() - t_start) * 1000,
+                          user_id=user_id, source=source)
         return JSONResponse(content={
             "id":      f"chatcmpl-{request_id}",
             "object":  "chat.completion",
@@ -847,7 +868,8 @@ async def chat_completions(request: Request):
             emit_security_log(request_id, user_prompt, "OUTPUT_BLOCK",
                               getattr(out_result, "score", 1.0), True,
                               getattr(out_result, "reason", "output scan"),
-                              response_text[:120], (time.monotonic() - t_start) * 1000)
+                              response_text[:120], (time.monotonic() - t_start) * 1000,
+                              user_id=user_id, source=source)
             return JSONResponse(content={
                 "id":      f"chatcmpl-{request_id}",
                 "object":  "chat.completion",
@@ -867,11 +889,13 @@ async def chat_completions(request: Request):
 
     emit_security_log(request_id, user_prompt, scan_decision, scan_score,
                       False, scan_reason, response_text,
-                      (time.monotonic() - t_start) * 1000)
+                      (time.monotonic() - t_start) * 1000,
+                      user_id=user_id, source=source)
     asyncio.create_task(_ship_prompt_to_law(
         request_id, user_prompt, messages,
         scan_decision, scan_score, scan_reason, False,
-        (time.monotonic() - t_start) * 1000
+        (time.monotonic() - t_start) * 1000,
+        user_id=user_id, source=source
     ))
 
     ollama_body["x_llamafirewall"] = {

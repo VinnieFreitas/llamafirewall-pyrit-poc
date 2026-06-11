@@ -411,6 +411,140 @@ existing workbook in-place without creating duplicates.
 
 ---
 
+---
+
+## NestJS Integration Spec — AI Portal short-term improvements
+
+This section documents the contract between the NestJS AI Portal backend and
+LlamaFirewall. Items 2 and 3 require small changes to both NestJS and `proxy.py`
+(already implemented on the LlamaFirewall side). Items 4 and 5 are pure NestJS.
+
+---
+
+### Item 1 — Fail-closed on pod unavailability (NestJS only)
+
+Change the NestJS HTTP error handler from fail-open to fail-closed:
+
+```typescript
+// After — fail-closed (correct for a financial institution)
+try {
+  const result = await llamafirewallClient.scan(payload);
+  return result;
+} catch (error) {
+  logger.error('LlamaFirewall unreachable — blocking request (fail-closed)');
+  throw new ServiceUnavailableException(
+    'Security scanning unavailable — request blocked'
+  );
+}
+```
+
+---
+
+### Item 2 — RAG chunk inspection (NestJS SearchHandler + proxy.py)
+
+In `SearchHandler.execute()`, inspect each chunk in parallel before returning
+`tool_result` to LangGraph. `proxy.py` already accepts `source: "rag_chunk"`.
+
+```typescript
+const chunks = await vectorSearch(query, storeId);
+
+const inspected = await Promise.all(
+  chunks.map(async (chunk) => {
+    try {
+      const result = await llamafirewallClient.post('/v1/chat/completions', {
+        model:    'llamafirewall',
+        messages: [{ role: 'user', content: chunk.content }],
+        user_id:  currentUser.upn,
+        source:   'rag_chunk',
+      });
+      const lf = result.data.x_llamafirewall;
+      if (lf.blocked) {
+        logger.warn('RAG chunk blocked', {
+          documentId: chunk.documentId, documentName: chunk.documentName,
+        });
+        return null;
+      }
+      return chunk;
+    } catch {
+      return null;  // LlamaFirewall unreachable — fail-closed, exclude chunk
+    }
+  })
+);
+
+const safeChunks = inspected.filter(Boolean);
+// Policy: if all chunks blocked → return empty tool_result, do not crash agent
+if (safeChunks.length === 0) {
+  logger.warn('All RAG chunks blocked', { query, storeId });
+  return [];
+}
+return safeChunks;
+```
+
+**KQL — monitor RAG chunk blocks in Sentinel:**
+```kusto
+LlamaFirewallEvents_CL
+| where source_s == "rag_chunk" and blocked_b == true
+| project TimeGenerated, user_id_s, scan_decision_s, scan_score_d, prompt_preview_s
+| order by TimeGenerated desc
+```
+
+---
+
+### Item 3 — Add userId to every LlamaFirewall call (NestJS only)
+
+Include the Entra ID UPN or OID in every LlamaFirewall REST call:
+
+```typescript
+const payload = {
+  model:    'llamafirewall',
+  messages: [{ role: 'user', content: userPrompt }],
+  user_id:  request.user?.upn ?? request.user?.oid ?? 'unknown',
+  source:   'user_input',
+};
+```
+
+`proxy.py` already reads `user_id` and `source` and includes them in both
+`LlamaFirewallEvents_CL` and `LlamaFirewallPrompts_CL`.
+
+**KQL — per-user anomaly detection seed:**
+```kusto
+LlamaFirewallEvents_CL
+| where blocked_b == true and source_s == "user_input"
+| summarize BlockCount = count() by user_id_s, bin(TimeGenerated, 1h)
+| where BlockCount > 5
+| order by BlockCount desc
+```
+
+---
+
+### Item 4 — Conversation turn limits (NestJS Agent Studio only)
+
+Cap sessions at 50 turns, force summarization at the limit. Raises Crescendo
+attack cost significantly — multi-turn jailbreaks require context persistence.
+
+```typescript
+const MAX_TURNS = 50;
+if (conversation.interactions.length >= MAX_TURNS) {
+  const summary = await summarizeConversation(conversation);
+  await conversation.reset({ keepSummary: summary });
+}
+```
+
+---
+
+### Item 5 — System prompt re-injection (NestJS dynamicSystemPromptMiddleware only)
+
+Re-inject system prompt every 20 turns to reset the trust boundary:
+
+```typescript
+const REINJECT_EVERY_N_TURNS = 20;
+if (turnIndex > 0 && turnIndex % REINJECT_EVERY_N_TURNS === 0) {
+  messages.unshift({ role: 'system', content: agent.systemPrompt });
+}
+```
+
+---
+
 ## Prompt Logging to Sentinel
 
 LlamaFirewall can ship the **full prompt text** of every request to a dedicated

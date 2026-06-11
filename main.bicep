@@ -182,6 +182,8 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = if (useManage
         columns: [
           { name: 'TimeGenerated',   type: 'datetime' }
           { name: 'request_id',      type: 'string'   }
+          { name: 'user_id',         type: 'string'   }
+          { name: 'source',          type: 'string'   }
           { name: 'profile',         type: 'string'   }
           { name: 'full_prompt',     type: 'string'   }
           { name: 'prompt_length',   type: 'int'      }
