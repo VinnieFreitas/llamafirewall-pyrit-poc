@@ -23,13 +23,11 @@ param adminPublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIANank1Xj0cdHHt7sBNB
 //
 param profile = 'lab'
 
-// --- corp-lab only ------------------------------------------------------------
+// --- corp profiles -----------------------------------------------------------
 //
-// BeyondTrust jump server IP/CIDR — restricts SSH access on both VMs.
-// Replace with your actual BeyondTrust IP before deploying corp-lab.
-// Example: '203.0.113.10/32'
-// Leave as '*' only for initial testing — restrict before production sandbox use.
-param beyondTrustSourceCIDR = '*'
+// Azure Bastion Developer SKU is used for SSH access to all corp profile VMs.
+// Deployed automatically by main.bicep — no additional parameters needed.
+// Access: Portal → <VM> → Connect → Bastion
 
 // --- Optional overrides -------------------------------------------------------
 

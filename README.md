@@ -1,17 +1,14 @@
-# LlamaFirewall + PyRIT — AI Security Pipeline
+# LlamaFirewall + PyRIT — Pipeline de Segurança para IA
 
-A layered LLM security pipeline built on Azure, with automated red-team testing
-and observability via Log Analytics and Azure Workbook. Deployable across four
-environment profiles — from a personal home lab to a corporate AKS production
-deployment.
+Pipeline de segurança para LLMs construído em camadas no Azure, com testes de red-team automatizados e observabilidade via Log Analytics e Azure Workbook. Suporta quatro profiles de ambiente — desde um home lab pessoal até um deployment em AKS corporativo em produção.
 
 ---
 
-## Architecture
+## Arquitetura
 
-The project supports four deployment profiles, each with a different topology:
+O projeto suporta quatro profiles de deployment, cada um com uma topologia diferente:
 
-**home-lab / home-preprod / home-production** — single VM, laptop runs PyRIT:
+**home-lab / home-preprod / home-production** — VM única, PyRIT roda no laptop:
 ```
 [ Linux Laptop ]                          [ Azure VM ]
   PyRIT ─── SSH tunnel ──────────────►  LlamaFirewall proxy (:8080)
@@ -23,228 +20,242 @@ The project supports four deployment profiles, each with a different topology:
                                     Azure Workbook Dashboard
 ```
 
-**corp-lab** — two VMs in sandbox subscription, BeyondTrust access:
+**corp-lab** — duas VMs na subscription sandbox, acesso via Azure Bastion Developer SKU:
 ```
-[ BeyondTrust ]
+[ Azure Bastion ]
       │ SSH
       ├──► PyRIT VM (B2ms)  ──────────────► LlamaFirewall VM (NC4as T4 GPU)
       └──► LlamaFirewall VM                         │
                                             Log Analytics → Sentinel
 ```
 
-**corp-preprod / corp-prod** — LlamaFirewall containerised inside AKS:
+**corp-preprod / corp-prod** — LlamaFirewall containerizado dentro do AKS:
 ```
-User → EntraID → Angular SPA (AKS)
-                      │
-                 Backend (AKS)
-                      │  OPENAI_ENDPOINT=http://llamafirewall-svc:8080/v1
-                      ▼
-              LlamaFirewall pod (AKS)   ← one env var change in backend
-                      │
-                 Azure OpenAI (private endpoint, different subscription)
-                      │
-              Sentinel LAW ← canary CronJob (hourly)
+Usuário → EntraID → Angular SPA (AKS)
+                          │
+                     Backend (AKS)
+                          │  OPENAI_ENDPOINT=http://llamafirewall-svc:8080/v1
+                          ▼
+              LlamaFirewall pod (AKS)   ← mudança de uma variável de ambiente no backend
+                          │
+                 Azure OpenAI (private endpoint, subscription diferente)
+                          │
+              Sentinel LAW ← canary CronJob (a cada hora)
 ```
 
 ---
 
 ## Stack
 
-- **Ollama** — local LLM inference server. Exposes an OpenAI-compatible API on `:11434`. Used in home profiles in place of Azure OpenAI — swap one URL for production.
+- **Ollama** — servidor local de inferência para LLMs. Expõe uma API compatível com OpenAI em `:11434`. Utilizado nos profiles home em substituição ao Azure OpenAI — em produção, basta trocar a URL.
 - **LLM model** — `phi3:mini` (lab) / `mistral:7b` (preprod) / `llama3:8b` (production)
-- **LlamaFirewall** — Meta's open-source LLM security framework, extended with a 6-layer scanner stack
-- **PyRIT** — Microsoft's open-source AI red-teaming toolkit
-- **NOVA** — YARA-style prompt pattern matching engine (novahunting.ai)
-- **Observability** — Azure Log Analytics → Azure Workbook → Microsoft Sentinel
+- **LlamaFirewall** — framework open-source de segurança para LLMs da Meta, estendido com uma stack de até 10 camadas de scanners
+- **PyRIT** — toolkit open-source de red-teaming para IA da Microsoft
+- **NOVA** — motor de matching de padrões no estilo YARA para prompts (novahunting.ai)
+- **Observabilidade** — Azure Log Analytics → Azure Workbook → Microsoft Sentinel
 
-**LlamaFirewall stack — 6 layers, runs in order on every prompt:**
+**LlamaFirewall stack — até 10 camadas, executadas em ordem a cada prompt:**
 
-| Layer | Scanner | Type | Catches |
+**Scanners de entrada (input):**
+
+| Camada | Scanner | Tipo | Detecta |
 |---|---|---|---|
-| 1 | PromptGuard 2 | ML classifier | Injection syntax, jailbreaks |
-| 2 | HiddenASCII | Rule-based | BiDi text, invisible chars, encoding tricks |
-| 3 | Regex + CustomPatterns | Rule-based | XSS, SQL injection, credentials, tool abuse |
-| 4 | LlamaGuard 3:8B | Semantic LLM | Social engineering, content safety, subtle jailbreaks |
-| 5 | NOVA (keyword+semantic) | YARA-style rules | Logic traps, tool injection, bioweapon synthesis, political manipulation |
-| 6 | Output scan *(preprod/prod)* | LlamaGuard 3:8B | Harmful content in LLM responses |
+| 1 | PromptGuard 2 | Classificador ML | Sintaxe de injection, jailbreaks |
+| 1.5 | PerplexityFilter *(opcional)* | Modelo GPT-2 | Sufixos adversariais por gradient descent (GCG, AutoDAN) |
+| 2 | HiddenASCII | Baseado em regras | Texto BiDi, caracteres invisíveis, encoding tricks |
+| 3 | Regex + CustomPatterns | Baseado em regras | XSS, SQL injection, credenciais, abuso de tools |
+| 4 | LlamaGuard 3:8B | LLM semântico | Engenharia social, segurança de conteúdo, jailbreaks sutis |
+| 5 | NOVA (keyword+semantic) | Regras YARA-style | Armadilhas lógicas, injeção de tools, síntese de bioarmas, manipulação política |
+| 6 | CrescendoTracker | Rastreamento de sessão | Escalada multi-turn, padrão Crescendo |
 
-**Achieved: 98.85% detection on 87-prompt adversarial dataset (+55.17% from single-scanner baseline)**
+**Scanners de saída (output — apenas preprod/prod):**
+
+| Camada | Scanner | Tipo | Detecta |
+|---|---|---|---|
+| 7 | LlamaGuard 3:8B output scan | LLM semântico | Conteúdo nocivo nas respostas do LLM |
+| 8 | CodeShield | Análise de código | Código malicioso, chamadas de sistema perigosas nas respostas |
+| 9 | Output sensitive data regex | Baseado em regras | CPF, CNPJ, credenciais, chaves de API, connection strings nas respostas |
+
+**Resultado alcançado: 98,85% de detecção em dataset adversarial de 87 prompts (+55,17% em relação ao baseline de scanner único)**
 
 ---
 
-## Environment Profiles
+## Profiles de Ambiente
 
-Four profiles drive VM size, LLM model, scanner thresholds, and topology.
-Both `deploy.sh` and `setup_vm.sh` prompt you to select a profile interactively.
+Quatro profiles definem o tamanho da VM, o modelo LLM, os thresholds dos scanners e a topologia.
+Tanto `deploy.sh` quanto `setup_vm.sh` solicitam a seleção interativa do profile.
 
-| Setting | home-lab | corp-lab | preprod | production |
+| Configuração | home-lab | corp-lab | preprod | production |
 |---|---|---|---|---|
-| **Topology** | Single VM | Two VMs | Single VM | Single VM |
+| **Topologia** | VM única | Duas VMs | VM única | VM única |
 | **LF VM size** | B8ms | NC4as_T4_v3 (GPU) | D8s_v3 | D16s_v3 |
 | **PyRIT** | Laptop | B2ms VM | Laptop/CI | Canary probe |
 | **LLM model** | phi3:mini | phi3:mini | mistral:7b | llama3:8b |
 | **PromptGuard threshold** | 0.05 | 0.05 | 0.10 | 0.15 |
 | **Output scanning** | ❌ | ❌ | ✅ | ✅ |
 | **NOVA LLM tier** | ❌ | ❌ | ❌ | ✅ |
-| **LAW retention** | 30 days | 30 days | 30 days | 90 days |
+| **Perplexity filter** | ❌ | ❌ | ✅ | ✅ |
+| **Crescendo tracker** | ✅ | ✅ | ✅ | ✅ |
+| **CodeShield** | ❌ | ❌ | ✅ | ✅ |
+| **Retenção LAW** | 30 dias | 30 dias | 30 dias | 90 dias |
 | **Auto-shutdown** | ✅ 23:00 UTC | ✅ 23:00 UTC | ✅ 23:00 UTC | ❌ |
-| **Public IP** | ✅ | ❌ | ❌ | ❌ |
-| **Access** | SSH tunnel | BeyondTrust | BeyondTrust | BeyondTrust |
-| **Est. cost (light use)** | ~$16/mo | ~$45/mo | ~$28/mo | ~$55/mo |
+| **IP Público** | ✅ | ❌ | ❌ | ❌ |
+| **Acesso** | SSH tunnel | Azure Bastion Developer SKU | Azure Bastion Developer SKU | Azure Bastion Developer SKU |
+| **Custo estimado (uso leve)** | ~$16/mês | ~$45/mês | ~$28/mês | ~$55/mês |
 
-> **corp-preprod** and **corp-prod** use containerised deployment in AKS — no Bicep profile needed.
+> **corp-preprod** e **corp-prod** utilizam deployment containerizado no AKS — nenhum profile Bicep é necessário.
 
 ---
 
-## Repository Structure
+## Estrutura do Repositório
 
 ```
 .
-├── main.bicep              # Azure infrastructure — profile-aware (lab/preprod/production/corp-lab)
-├── main.bicepparam         # Parameters (SSH key, profile, region, BeyondTrust CIDR)
-├── deploy.sh               # Step 1: interactive profile selector → deploys infra
-├── teardown.sh             # Destroys all Azure resources + cleans up local state
+├── main.bicep              # Infraestrutura Azure — profile-aware (lab/preprod/production/corp-lab)
+├── main.bicepparam         # Parâmetros (SSH key, profile, região)
+├── deploy.sh               # Passo 1: seletor interativo de profile → faz o deploy da infra
+├── teardown.sh             # Destroys todos os recursos Azure + limpeza do estado local
 │
-├── setup_vm.sh             # Step 2: VM bootstrap — accepts --profile lab|preprod|production
-├── proxy.py                # Step 2: LlamaFirewall FastAPI proxy — 6-layer scanner stack
-├── test_tunnel.sh          # Step 2: SSH tunnel + smoke test (home profiles)
+├── setup_vm.sh             # Passo 2: bootstrap da VM — aceita --profile lab|preprod|production
+├── proxy.py                # Passo 2: proxy FastAPI do LlamaFirewall — stack de até 10 camadas de scanners
+├── test_tunnel.sh          # Passo 2: SSH tunnel + smoke test (profiles home)
 │
-├── Dockerfile              # AKS deployment — CPU build (corp-preprod)
-├── Dockerfile.gpu          # AKS deployment — GPU build (corp-prod)
-├── .dockerignore           # Excludes infra/PyRIT/secrets from Docker build context
+├── Dockerfile              # Deployment AKS — build CPU (corp-preprod)
+├── Dockerfile.gpu          # Deployment AKS — build GPU (corp-prod)
+├── .dockerignore           # Exclui infra/PyRIT/secrets do Docker build context
 │
-├── setup_pyrit.sh          # Step 3: creates local venv + installs PyRIT
-├── pyrit_redteam.py        # Step 3: red-team script (--endpoint, --category, --prompts-file)
-├── custom_attacks.yaml     # Step 3: 87-prompt adversarial dataset (10 categories, PT-BR)
-├── attack_prompts.yaml     # Step 3: extended built-in attack library
-├── gandalf_attacks.yaml    # Step 3: 60-prompt Gandalf dataset (English, 3 Lakera sources)
-├── build_gandalf_dataset.py   # Step 3: downloads + curates Gandalf datasets from HuggingFace
-├── social_engineering_pt.nov  # NOVA rules — 10 rules covering PT-BR + Gandalf attack patterns
-├── canary_probe.py         # Production monitoring — 10-probe hourly canary + nightly full run
-├── .gitlab-ci.yml          # GitLab CI — manual PyRIT regression pipeline
+├── setup_pyrit.sh          # Passo 3: cria venv local + instala PyRIT
+├── pyrit_redteam.py        # Passo 3: script de red-team (--endpoint, --category, --prompts-file)
+├── custom_attacks.yaml     # Passo 3: dataset adversarial com 87 prompts (10 categorias, PT-BR)
+├── attack_prompts.yaml     # Passo 3: biblioteca de ataques built-in estendida
+├── gandalf_attacks.yaml    # Passo 3: dataset Gandalf com 60 prompts (inglês, 3 fontes Lakera)
+├── build_gandalf_dataset.py   # Passo 3: baixa e curada datasets Gandalf do HuggingFace
+├── social_engineering_pt.nov  # Regras NOVA — 10 regras cobrindo padrões PT-BR + Gandalf
+├── canary_probe.py         # Monitoramento em produção — canary de 10 probes por hora + execução noturna completa
+├── .gitlab-ci.yml          # GitLab CI — pipeline de regressão PyRIT com trigger manual
 │
-├── log_shipper.py          # Step 4: ships PyRIT results + live events to LAW / Sentinel
+├── log_shipper.py          # Passo 4: envia resultados PyRIT + eventos ao vivo para LAW / Sentinel
 │
-├── workbook_content.json   # Step 5: Azure Workbook definition
-├── deploy_workbook.py      # Step 5: deploys workbook (reuses same ID on redeploy)
+├── workbook_content.json   # Passo 5: definição do Azure Workbook
+├── deploy_workbook.py      # Passo 5: faz o deploy do workbook (reutiliza o mesmo ID no redeploy)
 │
-├── run_demo.sh             # Demo: preflight → PyRIT → log ship — one command
-├── toggle_nollm.sh         # Toggle Ollama bypass for fast PyRIT runs
-├── toggle_bypass.sh        # Toggle full firewall bypass (incident response)
+├── run_demo.sh             # Demo: preflight → PyRIT → log ship — tudo em um comando
+├── toggle_nollm.sh         # Alterna bypass do Ollama para execuções rápidas do PyRIT
+├── toggle_bypass.sh        # Alterna bypass completo do firewall (resposta a incidentes)
 │
-├── deploy-outputs.json     # Generated by deploy.sh — gitignored, keep locally
+├── deploy-outputs.json     # Gerado pelo deploy.sh — no .gitignore, manter localmente
 └── README.md
 ```
 
-> `deploy-outputs.json` is excluded from git (`.gitignore`) — contains your LAW primary key.
+> `deploy-outputs.json` está excluído do git (`.gitignore`) — contém a primary key do LAW.
 
 ---
 
-## Prerequisites
+## Pré-requisitos
 
-- Azure subscription (personal is fine for home profiles)
-- Azure CLI installed and logged in (`az login`)
-- Linux laptop with Python 3.10+, `ssh`, `jq`
-- HuggingFace account with access to [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
-- HuggingFace read token from https://huggingface.co/settings/tokens
+- Subscription Azure (pessoal é suficiente para profiles home)
+- Azure CLI instalado e autenticado (`az login`)
+- Laptop Linux com Python 3.10+, `ssh`, `jq`
+- Conta HuggingFace com acesso a [meta-llama/Llama-Prompt-Guard-2-86M](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M)
+- Token de leitura do HuggingFace em https://huggingface.co/settings/tokens
 
-After cloning, make all scripts executable:
+Após o clone do repositório, torne todos os scripts executáveis:
 ```bash
 chmod +x *.sh
 ```
 
-> LlamaGuard 3:8B is pulled via Ollama — no HuggingFace token needed for it.
+> LlamaGuard 3:8B é baixado via Ollama — não é necessário token HuggingFace para ele.
 
 ---
 
-## HuggingFace Setup — Do This Before Step 2
+## Configuração do HuggingFace — Fazer Antes do Passo 2
 
-PromptGuard 2 is a gated Meta model. One-time setup:
+PromptGuard 2 é um modelo Meta com acesso controlado. Configuração única:
 
-**1.** Create a free account at https://huggingface.co/join
+**1.** Crie uma conta gratuita em https://huggingface.co/join
 
-**2.** Accept the model licence at https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M
-— click **"Agree and access repository"** (instant approval)
+**2.** Aceite a licença do modelo em https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M
+— clique em **"Agree and access repository"** (aprovação imediata)
 
-**3.** Generate a read token at https://huggingface.co/settings/tokens
-→ **New token** → Role: **Read** → copy it
+**3.** Gere um token de leitura em https://huggingface.co/settings/tokens
+→ **New token** → Role: **Read** → copie
 
-> `setup_vm.sh` will prompt for this token interactively and inject it into
-> the systemd service. After first download the weights are cached locally.
+> `setup_vm.sh` solicitará esse token de forma interativa e o injetará no
+> serviço systemd. Após o primeiro download, os pesos ficam em cache localmente.
 
 ---
 
-## Step 1 — Deploy Azure Infrastructure
+## Passo 1 — Deploy da Infraestrutura Azure
 
 ```bash
 cd ~/Documents/Safra_AI_Defense
 
-# 1. Generate SSH key — skip if you already have one.
-#    Check first: ls ~/.ssh/id_ed25519.pub
-#    If the file exists, skip to step 2.
-#    If not, generate one:
+# 1. Gere uma SSH key — pule se já tiver uma.
+#    Verifique primeiro: ls ~/.ssh/id_ed25519.pub
+#    Se o arquivo existir, vá para o passo 2.
+#    Se não, gere uma:
 ssh-keygen -t ed25519 -C "llamapoc"
 
-# 2. Copy your public key into main.bicepparam
-#    Open the file and replace the adminPublicKey value with the output below:
+# 2. Copie sua chave pública para main.bicepparam
+#    Abra o arquivo e substitua o valor de adminPublicKey pela saída abaixo:
 cat ~/.ssh/id_ed25519.pub
-#    It should look like: param adminPublicKey = 'ssh-ed25519 AAAAC3Nz... your-key-here'
-#    ⚠️  Do this before running deploy.sh — the script will stop if the
-#    placeholder value hasn't been replaced.
+#    Deve ficar assim: param adminPublicKey = 'ssh-ed25519 AAAAC3Nz... sua-chave-aqui'
+#    ⚠️  Faça isso antes de executar deploy.sh — o script parará se o
+#    valor placeholder não tiver sido substituído.
 
-# 3. Deploy — the script will prompt for profile
+# 3. Deploy — o script solicitará a seleção do profile
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-The profile selector appears after confirming the subscription:
+O seletor de profile aparece após confirmar a subscription:
 
 ```
-1) lab         — Standard_B8ms   · phi3:mini   · ~$16/month
-2) preprod     — Standard_D8s_v3  · mistral:7b  · ~$28/month
-3) production  — Standard_D16s_v3 · llama3:8b   · ~$55/month
-4) corp-lab    — NC4as_T4_v3 GPU + B2ms PyRIT VM · ~$45/month
-                 ⚠️  Requires NC-series quota in sandbox subscription
+1) lab         — Standard_B8ms   · phi3:mini   · ~$16/mês
+2) preprod     — Standard_D8s_v3  · mistral:7b  · ~$28/mês
+3) production  — Standard_D16s_v3 · llama3:8b   · ~$55/mês
+4) corp-lab    — NC4as_T4_v3 GPU + B2ms PyRIT VM · ~$45/mês
+                 ⚠️  Requer quota NC-series na subscription sandbox
 ```
 
-> **corp-lab** auto-generates a dedicated SSH key pair at `~/.ssh/id_ed25519_llamapoc_corp`.
-> Do NOT reuse your personal key in a corporate environment.
+> **corp-lab** gera automaticamente um par de SSH keys dedicado em `~/.ssh/id_ed25519_llamapoc_corp`.
+> NÃO reutilize sua chave pessoal em ambientes corporativos.
 
 ---
 
-## Step 2 — Set Up the VM (home profiles)
+## Passo 2 — Configuração da VM (profiles home)
 
 ```bash
-# Copy scripts to VM (all three required)
+# Copie os scripts para a VM (todos os três são necessários)
 scp setup_vm.sh proxy.py social_engineering_pt.nov \
   azureuser@llamapoc-llama.eastus.cloudapp.azure.com:~/
 
-# Run setup — pass profile or let it prompt
+# Execute o setup — passe o profile ou deixe o script perguntar
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com \
   'bash ~/setup_vm.sh --profile lab 2>&1 | tee ~/setup.log'
 ```
 
-| Step | What happens |
+| Etapa | O que acontece |
 |---|---|
-| apt | System update + wait for apt-lock |
-| Ollama | Installs + pulls LLM model for the profile |
-| LlamaGuard3 | `ollama pull llama-guard3:8b` (~4.7 GB) |
+| apt | Atualização do sistema + aguarda apt-lock |
+| Ollama | Instalação + download do modelo LLM do profile |
+| LlamaGuard3 | `ollama pull llama-guard3:8b` (~4,7 GB) |
 | Python | venv + llamafirewall + transformers + torch + nova-hunting |
-| HfFolder patch | Compatibility shim for huggingface_hub >= 0.25 |
-| HF login | Interactive prompt for your token + PromptGuard 2 download (~170 MB) |
-| proxy.py | Deployed with profile-specific environment variables |
-| NOVA | Official rules cloned + custom rules deployed |
-| systemd | `ollama.service` + `llamafirewall.service` enabled and started |
+| HfFolder patch | Shim de compatibilidade para huggingface_hub >= 0.25 |
+| HF login | Prompt interativo para o token + download do PromptGuard 2 (~170 MB) |
+| proxy.py | Implantado com variáveis de ambiente específicas do profile |
+| NOVA | Regras oficiais clonadas + regras customizadas implantadas |
+| systemd | `ollama.service` + `llamafirewall.service` habilitados e iniciados |
 
-**Expected runtime:** lab ~20 min · preprod ~35 min · production ~45 min
+**Tempo estimado de execução:** lab ~20 min · preprod ~35 min · production ~45 min
 
-**Validate:**
+**Validação:**
 ```bash
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
-Expected: `/health` shows 6 active scanners, clean prompt → ALLOW, injection → BLOCK.
+Esperado: `/health` mostra 6 scanners ativos, prompt limpo → ALLOW, injection → BLOCK.
 
-**Always warm up models before running PyRIT** — cold models cause LlamaGuard3 to timeout on first request:
+**Sempre aqueça os modelos antes de executar o PyRIT** — modelos frios causam timeout no LlamaGuard3 na primeira requisição:
 
 ```bash
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
@@ -255,195 +266,230 @@ curl -sf http://localhost:11434/api/generate \
 EOF
 ```
 
-> Replace `phi3:mini` with `mistral:7b` or `llama3:8b` for preprod/production profiles.
+> Substitua `phi3:mini` por `mistral:7b` ou `llama3:8b` nos profiles preprod/production.
 
-**Known issues handled by the script:**
-1. apt lock on first boot — waits up to 2 min then force-clears
-2. `ollama run` CLI hangs — smoke test uses REST API with `--max-time 60`
-3. `huggingface_hub >= 0.25` — `HfFolder` removed, script applies compatibility shim
-4. LlamaFirewall `scanners` must be a dict — `{Role: [ScannerType]}`
-5. Blocking scan in async handler — `firewall.scan()` wrapped in `asyncio.to_thread()`
+**Problemas conhecidos tratados pelo script:**
+1. apt lock na primeira inicialização — aguarda até 2 min e então força a liberação
+2. CLI `ollama run` trava — smoke test usa REST API com `--max-time 60`
+3. `huggingface_hub >= 0.25` — `HfFolder` removido, script aplica shim de compatibilidade
+4. `scanners` do LlamaFirewall deve ser um dict — `{Role: [ScannerType]}`
+5. Scan bloqueante em handler async — `firewall.scan()` encapsulado com `asyncio.to_thread()`
 
 ---
 
-## Step 3 — Run PyRIT Red-Team (from your laptop)
+## Configuração de Scanners Adicionais
+
+### Perplexity Filter (camada 1.5) — desabilitado por padrão
+
+Detecta sufixos adversariais gerados por ataques baseados em gradient (GCG, AutoDAN, PEZ). Usa GPT-2 (~500 MB) para medir a incomum estatística das sequências de tokens — complementar ao HiddenASCII.
 
 ```bash
-# Install (one-time)
+# Ativar (requer download do GPT-2 ~500 MB na primeira execução)
+sudo systemctl set-environment PERPLEXITY_FILTER_ENABLED=1
+sudo systemctl set-environment PERPLEXITY_THRESHOLD=500.0
+sudo systemctl restart llamafirewall
+```
+
+> Threshold padrão: 500. Diminuir = mais agressivo (pode gerar falsos positivos em prompts técnicos longos). Aumentar = mais conservador.
+
+---
+
+### Crescendo Tracker (camada 7) — habilitado por padrão
+
+Rastreamento stateful de sessão para detectar escalada multi-turn. Bloqueia uma sessão após N near-misses consecutivos — o fingerprint clássico do ataque Crescendo.
+
+```bash
+# Ajustar sensibilidade (padrões recomendados para produção)
+sudo systemctl set-environment CRESCENDO_ENABLED=1
+sudo systemctl set-environment CRESCENDO_NEAR_MISS_THRESHOLD=0.03
+sudo systemctl set-environment CRESCENDO_BLOCK_AFTER=3
+sudo systemctl set-environment CRESCENDO_SESSION_TTL=3600
+sudo systemctl restart llamafirewall
+```
+
+> **Limitação:** estado em memória — resetado ao reiniciar o proxy. Em produção AKS com múltiplas réplicas, substituir `_session_store` por Redis para persistência entre pods.
+
+---
+
+### CodeShield (camada 8) e Output Sensitive Data (camada 9) — apenas preprod/prod
+
+Habilitados automaticamente quando `OUTPUT_SCAN_ENABLED=1`. Nenhuma configuração adicional necessária.
+
+- **CodeShield** — detecta código malicioso, chamadas de sistema perigosas e prompt injection em comentários de código nas respostas do LLM. Fail-open se não disponível na versão instalada do LlamaFirewall.
+- **Output sensitive data regex** — bloqueia respostas contendo CPF, CNPJ, chaves AWS, GitHub PAT, tokens Bearer, chaves privadas e connection strings.
+
+--- — Executar Red-Team com PyRIT (do seu laptop)
+
+```bash
+# Instalação (uma vez)
 chmod +x setup_pyrit.sh && ./setup_pyrit.sh
 
-# Open tunnel + warm models first (home profiles)
+# Abra o tunnel + aqueça os modelos primeiro (profiles home)
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 
-# Run full 87-prompt dataset
+# Execução completa com 87 prompts
 source venv/bin/activate
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml
 
-# Run against a specific endpoint (corp-lab — private IP)
+# Execução contra um endpoint específico (corp-lab — IP privado)
 python3 pyrit_redteam.py \
   --endpoint http://10.0.0.4:8080/v1 \
   --prompts-file custom_attacks.yaml
 
-# Run a single category
+# Execução de uma categoria específica
 python3 pyrit_redteam.py --prompts-file custom_attacks.yaml --category jailbreak
 
-# Dry run — validates endpoint only
+# Dry run — valida apenas o endpoint
 python3 pyrit_redteam.py --dry-run
 ```
 
-**Attack categories in `custom_attacks.yaml` (87 prompts, Brazilian Portuguese):**
+**Categorias de ataque em `custom_attacks.yaml` (87 prompts, Português Brasileiro):**
 
-| Category | Count | Notes |
+| Categoria | Qtd | Observações |
 |---|---|---|
 | `jailbreak` | 32 | DAN, developer mode, roleplay, fictional framing |
-| `evasion` | 17 | BiDi text, homoglyphs, code-switching, encoding |
-| `social_engineering` | 12 | Coercion, impersonation, emotional manipulation |
-| `content_safety` | 7 | XSS, SQL injection, harmful content |
-| `baseline` | 6 | Should all pass — validates legitimate traffic |
-| `prompt_injection` | 4 | Classic injection patterns |
-| `reliability` | 3 | Edge cases, should all pass |
-| `data_leakage` | 3 | Credential extraction, source code exfiltration |
-| `tool_abuse` | 2 | Command injection, dangerous function calls |
-| `policy_compliance` | 1 | Regulatory bypass |
+| `evasion` | 17 | Texto BiDi, homoglyphs, code-switching, encoding |
+| `social_engineering` | 12 | Coerção, impersonação, manipulação emocional |
+| `content_safety` | 7 | XSS, SQL injection, conteúdo nocivo |
+| `baseline` | 6 | Devem passar — valida tráfego legítimo |
+| `prompt_injection` | 4 | Padrões clássicos de injection |
+| `reliability` | 3 | Casos extremos, devem passar |
+| `data_leakage` | 3 | Extração de credenciais, exfiltração de código-fonte |
+| `tool_abuse` | 2 | Injeção de comandos, chamadas de função perigosas |
+| `policy_compliance` | 1 | Bypass regulatório |
 
-**Gandalf dataset `gandalf_attacks.yaml` (60 prompts, English):**
+**Dataset Gandalf `gandalf_attacks.yaml` (60 prompts, inglês):**
 
-Real human-generated attacks from Lakera's Gandalf red-teaming game — curated from three HuggingFace datasets. Use for cross-dataset validation alongside `custom_attacks.yaml`.
+Ataques reais gerados por humanos no jogo de red-teaming Gandalf da Lakera — curados de três datasets do HuggingFace. Use para validação cruzada junto ao `custom_attacks.yaml`.
 
-| Category | Count | Source | Notes |
+| Categoria | Qtd | Fonte | Observações |
 |---|---|---|---|
-| `prompt_injection` | 25 | `gandalf_ignore_instructions` | Classic "ignore previous instructions" variants |
-| `indirect_injection` | 20 | `gandalf_summarization` | Injection hidden inside document summarisation tasks |
-| `evasion` | 15 | `mosscap_prompt_injection` | DEF CON 2023 variant — acrostics, encoding, roleplay |
+| `prompt_injection` | 25 | `gandalf_ignore_instructions` | Variantes clássicas de "ignore previous instructions" |
+| `indirect_injection` | 20 | `gandalf_summarization` | Injection oculta em tarefas de sumarização de documentos |
+| `evasion` | 15 | `mosscap_prompt_injection` | Variante DEF CON 2023 — acrósticos, encoding, roleplay |
 
 ```bash
-# Rebuild the dataset (re-downloads from HuggingFace)
+# Reconstruir o dataset (re-download do HuggingFace)
 pip install datasets
 python3 build_gandalf_dataset.py
 
-# Run against LlamaFirewall
+# Executar contra o LlamaFirewall
 python3 pyrit_redteam.py --prompts-file gandalf_attacks.yaml
 ```
 
-**Detection results — Gandalf dataset (first run):**
+**Resultados de detecção — dataset Gandalf (primeira execução):**
 
-| Category | Pass rate | Notes |
+| Categoria | Taxa de acerto | Observações |
 |---|---|---|
-| `prompt_injection` | 100% | PromptGuard 2 catches all classic injection syntax |
-| `indirect_injection` | 50% | Hardest category — attacks hidden in document content |
-| `evasion` | 47% | Multi-step transformation and fictional framing attacks |
-| **Overall** | **70%** | Real-world attacks, no PT-BR tuning |
+| `prompt_injection` | 100% | PromptGuard 2 detecta toda a sintaxe clássica de injection |
+| `indirect_injection` | 50% | Categoria mais difícil — ataques ocultos em conteúdo de documentos |
+| `evasion` | 47% | Ataques de transformação multi-etapa e fictional framing |
+| **Geral** | **70%** | Ataques reais, sem tuning para PT-BR |
 
-> The gap vs `custom_attacks.yaml` (98.85%) is expected — the Gandalf dataset tests generalisation beyond the language and patterns the stack was tuned against.
+> A diferença em relação a `custom_attacks.yaml` (98,85%) é esperada — o dataset Gandalf testa a generalização além do idioma e dos padrões para os quais a stack foi treinada.
 
-**Detection rate progression:**
+**Progressão da taxa de detecção:**
 
-| Run | Config | Pass rate |
+| Execução | Configuração | Taxa |
 |---|---|---|
-| 1 | PromptGuard 2 only (threshold 0.50) | 43.68% |
-| 2 | PromptGuard 2 (threshold 0.05) | 60.92% |
-| 3 | + HiddenASCII + Regex + CustomPatterns | 72.41% |
-| 4 | + LlamaGuard 3:8B | 80.46% |
-| 5 | + dataset fixes + input truncation | 88.51% |
-| 6 | + fail-closed on timeout | 90.80% |
-| **7** | **+ NOVA (keyword + semantic)** | **98.85%** |
+| 1 | PromptGuard 2 apenas (threshold 0.50) | 43,68% |
+| 2 | PromptGuard 2 (threshold 0.05) | 60,92% |
+| 3 | + HiddenASCII + Regex + CustomPatterns | 72,41% |
+| 4 | + LlamaGuard 3:8B | 80,46% |
+| 5 | + correções no dataset + truncamento de input | 88,51% |
+| 6 | + fail-closed em timeout | 90,80% |
+| **7** | **+ NOVA (keyword + semantic)** | **98,85%** |
 
 ---
 
-## NO_LLM Mode — Speed Up PyRIT Runs
+## Modo NO_LLM — Acelerar Execuções do PyRIT
 
-Bypasses Ollama for allowed prompts — only the firewall scanner stack runs.
-Cuts per-prompt latency from ~23s down to ~7s.
+Contorna o Ollama para prompts permitidos — apenas a stack de scanners do firewall é executada.
+Reduz a latência por prompt de ~23s para ~7s.
 
 ```bash
-./toggle_nollm.sh on    # enable (fast mode)
-./toggle_nollm.sh off   # disable (full LLM responses)
+./toggle_nollm.sh on    # ativar (modo rápido)
+./toggle_nollm.sh off   # desativar (respostas LLM completas)
 ./toggle_nollm.sh status
 ```
 
 ---
 
-## Step 4 — Ship Logs to Log Analytics
+## Passo 4 — Enviar Logs para o Log Analytics
 
 ```bash
 source venv/bin/activate
 
-# After a PyRIT session
+# Após uma sessão PyRIT
 python3 log_shipper.py --mode pyrit
 
-# Target corporate Sentinel LAW instead of the PoC workspace
+# Apontar para o Sentinel LAW corporativo em vez do workspace do PoC
 python3 log_shipper.py --mode pyrit \
   --workspace-id <sentinel-workspace-id> \
   --workspace-key <sentinel-primary-key>
 
-# Stream live events during a test
+# Transmitir eventos ao vivo durante um teste
 python3 log_shipper.py --mode live \
   --vm-host azureuser@llamapoc-llama.eastus.cloudapp.azure.com
 ```
 
-> Sentinel workspace credentials: Portal → Log Analytics → your workspace → Agents → Primary key
+> Credenciais do workspace Sentinel: Portal → Log Analytics → seu workspace → Agents → Primary key
 
 ---
 
-## Step 5 — Deploy Azure Workbook
+## Passo 5 — Deploy do Azure Workbook
 
-> ⚠️ **Requires Azure CLI (`az`)** — run from your laptop or Azure Cloud Shell.
-> Do NOT run from the PyRIT or LlamaFirewall VMs (no `az` installed there).
+> ⚠️ **Requer Azure CLI (`az`)** — execute do seu laptop ou Azure Cloud Shell.
+> NÃO execute das VMs PyRIT ou LlamaFirewall (`az` não está instalado nelas).
 
 ```bash
-# Home-lab — reads credentials from deploy-outputs.json
+# Home-lab — lê credenciais do deploy-outputs.json
 source venv/bin/activate
 python3 deploy_workbook.py
 
-# Corp / Sentinel LAW — pass credentials directly (no deploy-outputs.json needed)
-# Cloud Shell: install httpx first: pip install httpx --user --quiet
+# Corp / Sentinel LAW — passe as credenciais diretamente (sem deploy-outputs.json)
+# Cloud Shell: instale httpx primeiro: pip install httpx --user --quiet
 python3 deploy_workbook.py \
   --workspace-id <sentinel-workspace-id> \
   --resource-id /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>
 ```
 
-> Find your Sentinel workspace resource ID: Portal → Log Analytics workspaces → your workspace → Properties → Resource ID
+> Encontre o resource ID do workspace Sentinel: Portal → Log Analytics workspaces → seu workspace → Properties → Resource ID
 
-The workbook ID is persisted in `deploy-outputs.json` — re-running updates the
-existing workbook in-place without creating duplicates.
+O workbook ID é persistido em `deploy-outputs.json` — reexecutar atualiza o workbook existente sem criar duplicatas.
 
 **Azure Portal → Monitor → Workbooks → LlamaFirewall Security Dashboard**
 
 ---
 
----
+## Spec de Integração NestJS — Melhorias de curto prazo no AI Portal
 
-## NestJS Integration Spec — AI Portal short-term improvements
-
-This section documents the contract between the NestJS AI Portal backend and
-LlamaFirewall. Items 2 and 3 require small changes to both NestJS and `proxy.py`
-(already implemented on the LlamaFirewall side). Items 4 and 5 are pure NestJS.
+Esta seção documenta o contrato entre o backend NestJS do AI Portal e o LlamaFirewall. Os itens 2 e 3 requerem pequenas alterações tanto no NestJS quanto no `proxy.py` (já implementadas no lado do LlamaFirewall). Os itens 4 e 5 são puramente NestJS.
 
 ---
 
-### Item 1 — Fail-closed on pod unavailability (NestJS only)
+### Item 1 — Fail-closed em indisponibilidade do pod (apenas NestJS)
 
-Change the NestJS HTTP error handler from fail-open to fail-closed:
+Altere o error handler HTTP do NestJS de fail-open para fail-closed:
 
 ```typescript
-// After — fail-closed (correct for a financial institution)
+// Depois — fail-closed (correto para uma instituição financeira)
 try {
   const result = await llamafirewallClient.scan(payload);
   return result;
 } catch (error) {
-  logger.error('LlamaFirewall unreachable — blocking request (fail-closed)');
+  logger.error('LlamaFirewall inacessível — requisição bloqueada (fail-closed)');
   throw new ServiceUnavailableException(
-    'Security scanning unavailable — request blocked'
+    'Scanning de segurança indisponível — requisição bloqueada'
   );
 }
 ```
 
 ---
 
-### Item 2 — RAG chunk inspection (NestJS SearchHandler + proxy.py)
+### Item 2 — Inspeção de chunks RAG (NestJS SearchHandler + proxy.py)
 
-In `SearchHandler.execute()`, inspect each chunk in parallel before returning
-`tool_result` to LangGraph. `proxy.py` already accepts `source: "rag_chunk"`.
+Em `SearchHandler.execute()`, inspecione cada chunk em paralelo antes de retornar o `tool_result` ao LangGraph. O `proxy.py` já aceita `source: "rag_chunk"`.
 
 ```typescript
 const chunks = await vectorSearch(query, storeId);
@@ -459,28 +505,28 @@ const inspected = await Promise.all(
       });
       const lf = result.data.x_llamafirewall;
       if (lf.blocked) {
-        logger.warn('RAG chunk blocked', {
+        logger.warn('Chunk RAG bloqueado', {
           documentId: chunk.documentId, documentName: chunk.documentName,
         });
         return null;
       }
       return chunk;
     } catch {
-      return null;  // LlamaFirewall unreachable — fail-closed, exclude chunk
+      return null;  // LlamaFirewall inacessível — fail-closed, exclui o chunk
     }
   })
 );
 
 const safeChunks = inspected.filter(Boolean);
-// Policy: if all chunks blocked → return empty tool_result, do not crash agent
+// Política: se todos os chunks forem bloqueados → retornar tool_result vazio, não travar o agent
 if (safeChunks.length === 0) {
-  logger.warn('All RAG chunks blocked', { query, storeId });
+  logger.warn('Todos os chunks RAG bloqueados', { query, storeId });
   return [];
 }
 return safeChunks;
 ```
 
-**KQL — monitor RAG chunk blocks in Sentinel:**
+**KQL — monitorar bloqueios de chunks RAG no Sentinel:**
 ```kusto
 LlamaFirewallEvents_CL
 | where source_s == "rag_chunk" and blocked_b == true
@@ -490,9 +536,9 @@ LlamaFirewallEvents_CL
 
 ---
 
-### Item 3 — Add userId to every LlamaFirewall call (NestJS only)
+### Item 3 — Adicionar userId a cada chamada do LlamaFirewall (apenas NestJS)
 
-Include the Entra ID UPN or OID in every LlamaFirewall REST call:
+Inclua o UPN ou OID do Entra ID em cada chamada REST ao LlamaFirewall:
 
 ```typescript
 const payload = {
@@ -503,10 +549,9 @@ const payload = {
 };
 ```
 
-`proxy.py` already reads `user_id` and `source` and includes them in both
-`LlamaFirewallEvents_CL` and `LlamaFirewallPrompts_CL`.
+O `proxy.py` já lê `user_id` e `source` e os inclui em `LlamaFirewallEvents_CL` e `LlamaFirewallPrompts_CL`.
 
-**KQL — per-user anomaly detection seed:**
+**KQL — base para detecção de anomalia por usuário:**
 ```kusto
 LlamaFirewallEvents_CL
 | where blocked_b == true and source_s == "user_input"
@@ -517,10 +562,9 @@ LlamaFirewallEvents_CL
 
 ---
 
-### Item 4 — Conversation turn limits (NestJS Agent Studio only)
+### Item 4 — Limites de turns em conversas (apenas NestJS Agent Studio)
 
-Cap sessions at 50 turns, force summarization at the limit. Raises Crescendo
-attack cost significantly — multi-turn jailbreaks require context persistence.
+Limite as sessões a 50 turns, forçando sumarização no limite. Eleva significativamente o custo de ataques Crescendo — jailbreaks multi-turn requerem persistência de contexto.
 
 ```typescript
 const MAX_TURNS = 50;
@@ -532,9 +576,9 @@ if (conversation.interactions.length >= MAX_TURNS) {
 
 ---
 
-### Item 5 — System prompt re-injection (NestJS dynamicSystemPromptMiddleware only)
+### Item 5 — Reinjeção do system prompt (apenas NestJS dynamicSystemPromptMiddleware)
 
-Re-inject system prompt every 20 turns to reset the trust boundary:
+Reinjete o system prompt a cada 20 turns para resetar o trust boundary:
 
 ```typescript
 const REINJECT_EVERY_N_TURNS = 20;
@@ -545,29 +589,26 @@ if (turnIndex > 0 && turnIndex % REINJECT_EVERY_N_TURNS === 0) {
 
 ---
 
-## Prompt Logging to Sentinel
+## Log de Prompts no Sentinel
 
-LlamaFirewall can ship the **full prompt text** of every request to a dedicated
-`LlamaFirewallPrompts_CL` table in your Sentinel LAW. This table is kept separate
-from the general `LlamaFirewallEvents_CL` table and restricted to incident
-investigators via table-level RBAC.
+O LlamaFirewall pode enviar o **texto completo do prompt** de cada requisição para uma tabela dedicada `LlamaFirewallPrompts_CL` no Sentinel LAW. Esta tabela é mantida separada da tabela geral `LlamaFirewallEvents_CL` e restrita a investigadores de incidentes via RBAC no nível de tabela.
 
-**Use cases:**
-- Incident investigation — a user complains their query was blocked; you see exactly what they sent
-- Threat hunting — a malicious prompt was allowed; you need the full text for analysis
-- Compliance audit — full record of what the LLM gateway received
+**Casos de uso:**
+- Investigação de incidentes — um usuário reclama que sua consulta foi bloqueada; você vê exatamente o que ele enviou
+- Threat hunting — um prompt malicioso foi permitido; você precisa do texto completo para análise
+- Auditoria de conformidade — registro completo do que o gateway LLM recebeu
 
-> ⚠️ **Data governance note:** Full prompts may contain PII (CPF, names, account numbers).
-> Always configure table-level RBAC before enabling in production.
-> In lab/corp-lab, prompts are synthetic attack data — PII redaction is optional.
+> ⚠️ **Nota de governança de dados:** Prompts completos podem conter PII (CPF, nomes, números de conta).
+> Sempre configure o RBAC no nível de tabela antes de ativar em produção.
+> Em lab/corp-lab, os prompts são dados sintéticos de ataque — redação de PII é opcional.
 
 ---
 
-### Step 1 — Restrict access to LlamaFirewallPrompts_CL in LAW
+### Passo 1 — Restringir acesso à LlamaFirewallPrompts_CL no LAW
 
 **Portal → Sentinel LAW → Access control (IAM) → Add role assignment**
 
-1. Create a custom role allowing only `LlamaFirewallPrompts_CL`:
+1. Crie uma role customizada permitindo apenas `LlamaFirewallPrompts_CL`:
 ```json
 {
   "Name": "LlamaFirewall Prompt Investigator",
@@ -581,28 +622,28 @@ investigators via table-level RBAC.
 }
 ```
 
-2. Assign the role to your incident investigator security group (1-2 groups max)
-3. Verify general Sentinel readers **cannot** query `LlamaFirewallPrompts_CL`
+2. Atribua a role ao grupo de segurança dos investigadores de incidentes (máximo 1-2 grupos)
+3. Verifique que leitores gerais do Sentinel **não conseguem** consultar `LlamaFirewallPrompts_CL`
 
 ---
 
-### Step 2 — Enable prompt logging on the LlamaFirewall VM
+### Passo 2 — Ativar log de prompts na VM do LlamaFirewall
 
 **Lab / corp-lab (Shared Key):**
 ```bash
 sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
-sudo systemctl set-environment LAW_WORKSPACE_ID=<your-sentinel-workspace-id>
-sudo systemctl set-environment LAW_WORKSPACE_KEY=<your-sentinel-primary-key>
+sudo systemctl set-environment LAW_WORKSPACE_ID=<seu-sentinel-workspace-id>
+sudo systemctl set-environment LAW_WORKSPACE_KEY=<sua-sentinel-primary-key>
 sudo systemctl restart llamafirewall
 
-# Verify
+# Verificar
 curl -sf http://localhost:8080/health | python3 -m json.tool
 # → "prompt_logging": true, "ingestion_method": "shared_key"
 ```
 
-**Preprod / production (Managed Identity — no keys):**
+**Preprod / production (Managed Identity — sem chaves):**
 
-The VM already has a System-Assigned Managed Identity and the DCR role assignment from the Bicep deployment. Get the DCE endpoint and DCR immutable ID from `deploy-outputs.json`:
+A VM já possui uma System-Assigned Managed Identity e o role assignment do DCR do deployment Bicep. Obtenha o endpoint DCE e o ID imutável do DCR em `deploy-outputs.json`:
 
 ```bash
 cat deploy-outputs.json | python3 -c "
@@ -611,182 +652,183 @@ print('DCE:', d.get('dceEndpoint',{}).get('value'))
 print('DCR:', d.get('dcrImmutableId',{}).get('value'))
 "
 
-# On the LlamaFirewall VM:
+# Na VM do LlamaFirewall:
 sudo systemctl set-environment PROMPT_LOGGING_ENABLED=1
 sudo systemctl set-environment DCE_ENDPOINT=<dce-endpoint>
 sudo systemctl set-environment DCR_IMMUTABLE_ID=<dcr-immutable-id>
-# LAW_INGESTION_METHOD=managed_identity is already set by setup_vm.sh for preprod/production
+# LAW_INGESTION_METHOD=managed_identity já é definido pelo setup_vm.sh para preprod/production
 sudo systemctl restart llamafirewall
 
-# Verify
+# Verificar
 curl -sf http://localhost:8080/health | python3 -m json.tool
 # → "prompt_logging": true, "ingestion_method": "managed_identity"
 ```
 
-> The Managed Identity token is fetched automatically from the Azure IMDS endpoint
-> (`169.254.169.254`) inside the VM. Tokens are cached and refreshed 5 minutes before
-> expiry. No credentials are stored anywhere.
+> O token Managed Identity é obtido automaticamente do endpoint Azure IMDS
+> (`169.254.169.254`) dentro da VM. Os tokens são armazenados em cache e renovados
+> 5 minutos antes do vencimento. Nenhuma credencial é armazenada em lugar algum.
 
 ---
 
-### Step 3 — Enable PII redaction (production only)
+### Passo 3 — Ativar redação de PII (apenas em produção)
 
-In production, enable redaction via Azure AI Language before prompts land in LAW:
+Em produção, ative a redação via Azure AI Language antes que os prompts cheguem ao LAW:
 
 ```bash
 sudo systemctl set-environment PII_REDACTION_ENABLED=1
-sudo systemctl set-environment AZURE_LANGUAGE_ENDPOINT=https://<your-resource>.cognitiveservices.azure.com
-sudo systemctl set-environment AZURE_LANGUAGE_KEY=<your-language-key>
+sudo systemctl set-environment AZURE_LANGUAGE_ENDPOINT=https://<seu-recurso>.cognitiveservices.azure.com
+sudo systemctl set-environment AZURE_LANGUAGE_KEY=<sua-language-key>
 sudo systemctl restart llamafirewall
 ```
 
-The API masks detected PII entities (CPF, names, emails, phone numbers, account numbers)
-with `*` characters before the prompt is shipped to LAW. The original unredacted prompt
-remains in VM journald only.
+A API mascara entidades PII detectadas (CPF, nomes, e-mails, telefones, números de conta)
+com caracteres `*` antes de enviar o prompt ao LAW. O prompt original não redatado
+permanece apenas no journald da VM.
 
-> PII redaction is **fail-open** — if the API is unavailable, the prompt ships as-is
-> rather than blocking the request. For stricter control, set `PII_REDACTION_ENABLED=1`
-> alongside a Sentinel Analytics Rule that alerts on `pii_redacted: false` records.
+> A redação de PII é **fail-open** — se a API estiver indisponível, o prompt é enviado como está,
+> sem bloquear a requisição. Para controle mais estrito, configure `PII_REDACTION_ENABLED=1`
+> junto com uma Analytics Rule no Sentinel que alerte para registros com `pii_redacted: false`.
 
 ---
 
-### Step 4 — Query prompts in Sentinel
+### Passo 4 — Consultar prompts no Sentinel
 
 ```kusto
-// All prompts in the last 24 hours
+// Todos os prompts nas últimas 24 horas
 LlamaFirewallPrompts_CL
 | where TimeGenerated > ago(24h)
 | project TimeGenerated, request_id_s, scan_decision_s, blocked_b,
           scan_score_d, full_prompt_s
 | order by TimeGenerated desc
 
-// Blocked prompts only — for threat hunting
+// Apenas prompts bloqueados — para threat hunting
 LlamaFirewallPrompts_CL
 | where TimeGenerated > ago(7d) and blocked_b == true
 | project TimeGenerated, scan_decision_s, scan_reason_s,
           scan_score_d, full_prompt_s
 | order by scan_score_d desc
 
-// Investigate a specific request by ID
+// Investigar uma requisição específica por ID
 LlamaFirewallPrompts_CL
-| where request_id_s == "<request-id-from-user-complaint>"
+| where request_id_s == "<request-id-da-reclamacao-do-usuario>"
 | project TimeGenerated, full_prompt_s, scan_decision_s,
           scan_reason_s, scan_score_d, pii_redacted_b
 ```
 
 ---
 
-### AKS / production — env vars via Kubernetes Secret
+### AKS / production — variáveis de ambiente via Kubernetes Secret
 
-In production (AKS pod), set via Kubernetes Secret instead of systemd:
+Em produção (pod AKS), configure via Kubernetes Secret em vez de systemd:
 
 ```bash
 kubectl create secret generic llamafirewall-prompt-logging \
   --namespace llamafirewall \
   --from-literal=PROMPT_LOGGING_ENABLED=1 \
   --from-literal=LAW_WORKSPACE_ID=<id> \
-  --from-literal=LAW_WORKSPACE_KEY=<key> \
+  --from-literal=LAW_WORKSPACE_KEY=<chave> \
   --from-literal=PII_REDACTION_ENABLED=1 \
   --from-literal=AZURE_LANGUAGE_ENDPOINT=<endpoint> \
-  --from-literal=AZURE_LANGUAGE_KEY=<key>
+  --from-literal=AZURE_LANGUAGE_KEY=<chave>
 ```
 
 ---
 
-When legitimate traffic is being dropped by LlamaFirewall, enable bypass mode.
-The proxy stays running — no network changes needed. All bypassed requests are
-still logged to Sentinel with `scan_decision: BYPASS` for audit trail.
+## Modo Bypass — Resposta a Incidentes
 
-**Home profiles (VM):**
+Quando tráfego legítimo está sendo bloqueado pelo LlamaFirewall, ative o modo bypass.
+O proxy continua em execução — nenhuma alteração de rede é necessária. Todas as requisições em bypass continuam sendo registradas no Sentinel com `scan_decision: BYPASS` para trilha de auditoria.
+
+**Profiles home (VM):**
 ```bash
-./toggle_bypass.sh on    # disable scanning — forward directly to Ollama
-./toggle_bypass.sh off   # re-enable scanning
+./toggle_bypass.sh on    # desativa o scanning — encaminha diretamente ao Ollama
+./toggle_bypass.sh off   # reativa o scanning
 ./toggle_bypass.sh status
 ```
 
 **Corp-preprod / corp-prod (AKS):**
 ```bash
 kubectl set env deployment/llamafirewall BYPASS_MODE=1 -n llamafirewall
-# Re-enable when resolved:
+# Reativar quando resolvido:
 kubectl set env deployment/llamafirewall BYPASS_MODE=0 -n llamafirewall
 ```
 
 ---
 
-## Corp-Lab Deployment
+## Deployment Corp-Lab
 
-Two VMs in an isolated sandbox subscription. BeyondTrust for access, no SSH tunnel.
+Duas VMs em uma subscription sandbox isolada. Acesso via Azure Bastion Developer SKU, sem SSH tunnel.
 
-**Prerequisites:**
-1. NC-series quota approved in sandbox subscription — Portal → Subscriptions → Usage + quotas → Request increase (Standard NCASv3_T4 Family, minimum 4 vCPUs)
-2. Set `beyondTrustSourceCIDR` in `main.bicepparam` to your BeyondTrust IP (e.g. `'203.0.113.10/32'`)
-3. **Trusted Launch is automatically disabled** in Bicep for all corp profiles — required for NVIDIA GPU driver to bind correctly. Do not re-enable it.
-4. **Register the StandardSecurityType feature** in the sandbox subscription — required for deploying VMs with Trusted Launch disabled. Run once per subscription:
+**Pré-requisitos:**
+1. Quota NC-series aprovada na subscription sandbox — Portal → Subscriptions → Usage + quotas → Request increase (Standard NCASv3_T4 Family, mínimo 4 vCPUs)
+2. Azure Bastion Developer SKU é implantado automaticamente pelo `main.bicep` — nenhuma configuração de CIDR necessária. Acesso: Portal → VM → Connect → Bastion
+3. **Trusted Launch é automaticamente desabilitado** no Bicep para todos os profiles corp — necessário para o driver NVIDIA GPU funcionar corretamente. Não reative.
+4. **Registre o feature StandardSecurityType** na subscription sandbox — necessário para deploy de VMs com Trusted Launch desabilitado. Execute uma vez por subscription:
    ```bash
    az feature register \
      --namespace Microsoft.Compute \
      --name UseStandardSecurityType
-   # Wait for state to show "Registered" (~1-2 minutes)
+   # Aguarde o estado mostrar "Registered" (~1-2 minutos)
    az feature show \
      --namespace Microsoft.Compute \
      --name UseStandardSecurityType \
      --query properties.state
    ```
-5. When connecting via Bastion, GitHub requires a Personal Access Token for git clone (password auth disabled) — generate at: github.com → Settings → Developer settings → Personal access tokens → repo scope
+5. Ao conectar via Bastion, o GitHub requer um Personal Access Token para git clone (autenticação por senha desabilitada) — gere em: github.com → Settings → Developer settings → Personal access tokens → escopo repo
 
 **Deploy:**
 ```bash
 ./deploy.sh
 # → y → 4 (corp-lab)
-# → Dedicated SSH key auto-generated at ~/.ssh/id_ed25519_llamapoc_corp
-# → Press Enter to continue
+# → SSH key dedicada gerada automaticamente em ~/.ssh/id_ed25519_llamapoc_corp
+# → Pressione Enter para continuar
 ```
 
-Outputs after deployment:
-- **LlamaFirewall private IP** — PyRIT connects here (e.g. `10.0.0.4`)
-- **PyRIT VM FQDN** — BeyondTrust access for red-team sessions
-- **LlamaFirewall VM FQDN** — BeyondTrust access for admin/setup
+Outputs após o deployment:
+- **IP privado do LlamaFirewall** — PyRIT se conecta aqui (ex.: `10.0.0.4`)
+- **FQDN da VM PyRIT** — acesso Azure Bastion Developer SKU para sessões de red-team
+- **FQDN da VM LlamaFirewall** — acesso Azure Bastion Developer SKU para admin/setup
 
-**Set up LlamaFirewall VM:**
+**Configurar VM do LlamaFirewall:**
 ```bash
-# Connect via Bastion → SSH terminal opens in browser
-# Clone the repo (GitHub requires a Personal Access Token — password auth is disabled)
-# Generate one at: github.com → Settings → Developer settings → Personal access tokens
-# Scope: repo · Expiration: 7 days is enough
-git clone https://<your-github-username>:<YOUR_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
+# Conecte via Bastion → terminal SSH abre no browser
+# Clone o repositório (GitHub requer Personal Access Token — autenticação por senha desabilitada)
+# Gere em: github.com → Settings → Developer settings → Personal access tokens
+# Escopo: repo · Validade: 7 dias é suficiente
+git clone https://<seu-usuario-github>:<SEU_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
 cd llamafirewall-pyrit-poc
 chmod +x *.sh
 
-# Run setup — detects repo location automatically (no scp needed)
+# Execute o setup — detecta a localização do repositório automaticamente (sem scp necessário)
 bash setup_vm.sh --profile lab 2>&1 | tee ~/setup.log
 
-# After setup — manually copy NOVA rules if needed
+# Após o setup — copie as regras NOVA manualmente se necessário
 sudo cp social_engineering_pt.nov /opt/llamafirewall/nova-rules-custom/
 sudo systemctl restart llamafirewall
-curl -sf http://localhost:8080/health  # should show NOVA(10rules)
+curl -sf http://localhost:8080/health  # deve mostrar NOVA(10rules)
 ```
 
-**Set up PyRIT VM:**
+**Configurar VM PyRIT:**
 ```bash
-# Connect via Bastion → SSH terminal opens in browser
-git clone https://<your-github-username>:<YOUR_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
+# Conecte via Bastion → terminal SSH abre no browser
+git clone https://<seu-usuario-github>:<SEU_PAT>@github.com/VinnieFreitas/llamafirewall-pyrit-poc.git
 cd llamafirewall-pyrit-poc
 chmod +x *.sh
 
-# Install PyRIT
+# Instalar PyRIT
 sudo apt install python3.10-venv -y
 ./setup_pyrit.sh
 source venv/bin/activate
 ```
 
-**Run PyRIT** — no SSH tunnel, direct private IP:
+**Executar PyRIT** — sem SSH tunnel, IP privado direto:
 ```bash
 python3 pyrit_redteam.py \
-  --endpoint http://<lf-private-ip>:8080/v1 \
+  --endpoint http://<lf-ip-privado>:8080/v1 \
   --prompts-file custom_attacks.yaml
 ```
 
-**Ship to Sentinel:**
+**Enviar para o Sentinel:**
 ```bash
 python3 log_shipper.py --mode pyrit \
   --workspace-id <sentinel-workspace-id> \
@@ -795,19 +837,19 @@ python3 log_shipper.py --mode pyrit \
 
 ---
 
-## Corp-Preprod Deployment
+## Deployment Corp-Preprod
 
-LlamaFirewall runs as a container in your AKS cluster. PyRIT runs as a GitLab CI job.
+LlamaFirewall roda como container no cluster AKS. PyRIT roda como job GitLab CI.
 
-**Architecture:**
+**Arquitetura:**
 ```
-GitLab CI (PyRIT job)
+GitLab CI (job PyRIT)
     │  --endpoint http://llamafirewall-svc:8080/v1
     ▼
 AKS → LlamaFirewall pod (CPU) → Azure OpenAI (private endpoint)
 ```
 
-**1. Build and push CPU image:**
+**1. Build e push da imagem CPU:**
 ```bash
 docker build -t <acr>.azurecr.io/llamafirewall-proxy:preprod \
   --build-arg HF_TOKEN=<hf-token> -f Dockerfile .
@@ -815,61 +857,61 @@ az acr login --name <acr>
 docker push <acr>.azurecr.io/llamafirewall-proxy:preprod
 ```
 
-**2. Deploy to AKS:**
+**2. Deploy no AKS:**
 ```bash
 kubectl create namespace llamafirewall
 kubectl create secret generic llamafirewall-secrets \
   --namespace llamafirewall \
   --from-literal=HF_TOKEN=<hf-token> \
   --from-literal=SENTINEL_WORKSPACE_ID=<id> \
-  --from-literal=SENTINEL_WORKSPACE_KEY=<key>
+  --from-literal=SENTINEL_WORKSPACE_KEY=<chave>
 kubectl apply -f k8s/llamafirewall-preprod.yaml
 ```
 
-**3. Point backend at LlamaFirewall — one env var change:**
+**3. Apontar o backend para o LlamaFirewall — uma mudança de variável de ambiente:**
 ```bash
 kubectl set env deployment/backend \
   OPENAI_ENDPOINT=http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
   -n <backend-namespace>
 ```
 
-**4. Configure GitLab CI variables** (Settings → CI/CD → Variables → mark as Masked):
+**4. Configurar variáveis GitLab CI** (Settings → CI/CD → Variables → marcar como Masked):
 
-| Variable | Value |
+| Variável | Valor |
 |---|---|
 | `LLAMAFIREWALL_ENDPOINT` | `http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1` |
-| `SENTINEL_WORKSPACE_ID` | your Sentinel workspace ID |
-| `SENTINEL_WORKSPACE_KEY` | your Sentinel primary key |
+| `SENTINEL_WORKSPACE_ID` | ID do workspace Sentinel |
+| `SENTINEL_WORKSPACE_KEY` | Primary key do Sentinel |
 
-Update `YOUR_RUNNER_TAG_HERE` in `.gitlab-ci.yml` with the runner tag your DevOps team confirms.
+Atualize `YOUR_RUNNER_TAG_HERE` em `.gitlab-ci.yml` com a tag do runner confirmada pelo time de DevOps.
 
 ---
 
-## Corp-Prod Deployment
+## Deployment Corp-Prod
 
-Same AKS architecture as preprod — GPU node pool, production profile, hourly canary probe.
+Mesma arquitetura AKS do preprod — GPU node pool, profile production, canary probe a cada hora.
 
-**Architecture:**
+**Arquitetura:**
 ```
-User → EntraID → Angular SPA (AKS)
-                      │
-                 Backend (AKS)  [one env var: OPENAI_ENDPOINT]
-                      │
+Usuário → EntraID → Angular SPA (AKS)
+                          │
+                     Backend (AKS)  [uma env var: OPENAI_ENDPOINT]
+                          │
               LlamaFirewall pod (AKS — GPU node pool)
-                      │
-              Azure OpenAI (private endpoint, different subscription)
+                          │
+              Azure OpenAI (private endpoint, subscription diferente)
 
-              Canary CronJob (AKS) → Sentinel LAW → Alerts
+              Canary CronJob (AKS) → Sentinel LAW → Alertas
 ```
 
-**1. Build and push GPU image:**
+**1. Build e push da imagem GPU:**
 ```bash
 docker build -t <acr>.azurecr.io/llamafirewall-proxy:prod \
   --build-arg HF_TOKEN=<hf-token> -f Dockerfile.gpu .
 docker push <acr>.azurecr.io/llamafirewall-proxy:prod
 ```
 
-**2. Deploy to GPU node pool** — add to pod spec:
+**2. Deploy no GPU node pool** — adicione ao pod spec:
 ```yaml
 resources:
   requests:
@@ -878,19 +920,19 @@ resources:
     nvidia.com/gpu: 1
 ```
 
-**3. Deploy canary CronJob** (runs every hour automatically):
+**3. Deploy do canary CronJob** (executa automaticamente a cada hora):
 ```bash
 kubectl apply -f k8s/canary-cronjob.yaml -n llamafirewall
 ```
 
-Manual canary run at any time:
+Execução manual do canary a qualquer momento:
 ```bash
 python3 canary_probe.py --mode canary \
   --endpoint http://llamafirewall-svc.llamafirewall.svc.cluster.local:8080/v1 \
   --workspace-id <sentinel-id> --workspace-key <sentinel-key>
 ```
 
-**4. Sentinel alert** — create an Analytics Rule:
+**4. Alerta no Sentinel** — crie uma Analytics Rule:
 ```kusto
 LlamaFirewallCanary_CL
 | where TimeGenerated > ago(2h)
@@ -901,46 +943,46 @@ LlamaFirewallCanary_CL
 
 ---
 
-## Cost Management
+## Gestão de Custos
 
 ```bash
-# Deallocate VM when done (stops compute billing, keeps disk)
+# Deallocate a VM quando terminar (para a cobrança de computação, mantém o disco)
 az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 
-# Start again when needed
+# Iniciar novamente quando necessário
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
 ```
 
-**Cost by profile (light usage ~20 hrs/month active):**
+**Custo por profile (uso leve ~20 hrs/mês ativo):**
 
 | Profile | VM | Storage | LAW | Total |
 |---|---|---|---|---|
-| lab | ~$8 (B8ms) | ~$5 | Free | **~$16/month** |
-| preprod | ~$15 (D8s_v3) | ~$8 | Free | **~$28/month** |
-| production | ~$32 (D16s_v3) | ~$15 | ~$5 | **~$55/month** |
-| corp-lab | ~$30 (NC4as+B2ms) | ~$10 | Free | **~$45/month** |
+| lab | ~$8 (B8ms) | ~$5 | Gratuito | **~$16/mês** |
+| preprod | ~$15 (D8s_v3) | ~$8 | Gratuito | **~$28/mês** |
+| production | ~$32 (D16s_v3) | ~$15 | ~$5 | **~$55/mês** |
+| corp-lab | ~$30 (NC4as+B2ms) | ~$10 | Gratuito | **~$45/mês** |
 
-> Production and corp-prod have no auto-shutdown — remember to deallocate manually.
+> Production e corp-prod não possuem auto-shutdown — lembre-se de fazer deallocate manualmente.
 
 ---
 
 ## Teardown
 
 ```bash
-# 1. Close SSH tunnel (home profiles)
+# 1. Fechar SSH tunnel (profiles home)
 kill $(cat /tmp/llamapoc_tunnel.pid)
 
 # 2. Deallocate VM
 az vm deallocate --resource-group rg-llamapoc --name llamapoc-vm --no-wait
 ```
 
-> ⚠️ **Deallocate ≠ Shutdown.** `sudo shutdown` keeps billing. Always use `az vm deallocate`.
+> ⚠️ **Deallocate ≠ Shutdown.** `sudo shutdown` mantém a cobrança. Use sempre `az vm deallocate`.
 
-**Resuming:**
+**Retomar:**
 ```bash
 az vm start --resource-group rg-llamapoc --name llamapoc-vm
 ./test_tunnel.sh azureuser@llamapoc-llama.eastus.cloudapp.azure.com
-# Warm up models before running PyRIT
+# Aqueça os modelos antes de executar o PyRIT
 ssh azureuser@llamapoc-llama.eastus.cloudapp.azure.com << 'EOF'
 curl -sf http://localhost:11434/api/generate \
   -d '{"model":"llama-guard3:8b","prompt":"hello","stream":false}' > /dev/null && echo "llama-guard3 warm"
@@ -949,42 +991,46 @@ curl -sf http://localhost:11434/api/generate \
 EOF
 ```
 
-**Full destroy:**
+**Destruição completa:**
 ```bash
 ./teardown.sh
 ```
 
 ---
 
-## Production Hardening Roadmap
+## Roadmap de Hardening para Produção
 
-**Implemented:**
+**Implementado:**
 
-| ✅ | Scanner | What it catches |
+| ✅ | Scanner | O que detecta |
 |---|---|---|
-| ✅ | PromptGuard 2 | Injection syntax, jailbreak patterns |
-| ✅ | HiddenASCII | BiDi text, invisible chars, encoding tricks |
-| ✅ | Regex + CustomPatterns | XSS, SQL, credentials, tool abuse |
-| ✅ | LlamaGuard 3:8B | Social engineering, content safety |
-| ✅ | NOVA (keyword+semantic) | Logic traps, tool injection, bioweapon synthesis |
-| ✅ (preprod+prod) | Output scanning | Harmful content in LLM responses |
+| ✅ | PromptGuard 2 | Sintaxe de injection, padrões de jailbreak |
+| ✅ (opcional) | PerplexityFilter | Sufixos adversariais gerados por gradient descent |
+| ✅ | HiddenASCII | Texto BiDi, caracteres invisíveis, encoding tricks |
+| ✅ | Regex + CustomPatterns | XSS, SQL, credenciais, abuso de tools |
+| ✅ | LlamaGuard 3:8B | Engenharia social, segurança de conteúdo |
+| ✅ | NOVA (keyword+semantic) | Armadilhas lógicas, injeção de tools, síntese de bioarmas |
+| ✅ | CrescendoTracker | Escalada multi-turn, padrão Crescendo (estado em memória) |
+| ✅ (preprod+prod) | Output scanning (LlamaGuard3) | Conteúdo nocivo nas respostas do LLM |
+| ✅ (preprod+prod) | CodeShield | Código malicioso nas respostas |
+| ✅ (preprod+prod) | Output sensitive data regex | CPF, CNPJ, credenciais, chaves nas respostas |
 
 **Roadmap:**
 
-| Gap | Notes | Fix |
+| Gap | Observações | Correção |
 |---|---|---|
-| NOVA LLM tier | Disabled — phi3:mini caused false positives | Dedicated safety classifier on GPU |
-| GPU inference | CPU averages ~23s/prompt | NC-series T4 → ~1-2s/prompt (implemented in corp-lab/prod) |
-| Kubernetes manifests | k8s/ folder referenced but not yet committed | Add Deployment, Service, ConfigMap, CronJob YAMLs |
-| GitLab runner tag | `YOUR_RUNNER_TAG_HERE` placeholder in `.gitlab-ci.yml` | Update when DevOps confirms runner type |
+| NOVA LLM tier | Desabilitado — phi3:mini causava falsos positivos | Classificador de segurança dedicado na GPU |
+| Inferência GPU | CPU média ~23s/prompt | NC-series T4 → ~1-2s/prompt (implementado em corp-lab/prod) |
+| Kubernetes manifests | Pasta k8s/ referenciada mas ainda não commitada | Adicionar YAMLs de Deployment, Service, ConfigMap, CronJob |
+| GitLab runner tag | Placeholder `YOUR_RUNNER_TAG_HERE` em `.gitlab-ci.yml` | Atualizar quando o time de DevOps confirmar o tipo do runner |
 
 ---
 
-## Security Notes
+## Notas de Segurança
 
-- `deploy-outputs.json` contains your LAW primary key — **never commit this file**
-- Home profiles: NSG allows SSH from any IP — restrict `sourceAddressPrefix` in `main.bicep` for production use
-- Corp-lab: NSG restricts SSH to BeyondTrust source CIDR only
-- LlamaFirewall proxy binds to `127.0.0.1` on VMs — only reachable via SSH tunnel or internal VNet
-- HuggingFace token is injected into systemd env / Kubernetes secret — never stored in config files
-- Corp SSH key (`id_ed25519_llamapoc_corp`) is separate from personal key — never reuse personal keys in corporate environments
+- `deploy-outputs.json` contém a primary key do LAW — **nunca commite este arquivo**
+- Profiles home: NSG permite SSH de qualquer IP — restrinja `sourceAddressPrefix` em `main.bicep` para uso em produção
+- Corp profiles: NSG restringe SSH ao service tag `VirtualNetwork` — acessível apenas via Azure Bastion
+- O proxy LlamaFirewall faz bind em `127.0.0.1` nas VMs — acessível apenas via SSH tunnel ou VNet interna
+- O token HuggingFace é injetado no env do systemd / Kubernetes Secret — nunca armazenado em arquivos de configuração
+- A SSH key corp (`id_ed25519_llamapoc_corp`) é separada da chave pessoal — nunca reutilize chaves pessoais em ambientes corporativos

@@ -6,7 +6,7 @@
 //    preprod    → single VM D8s_v3      / home use  / SSH tunnel from laptop
 //    production → single VM D16s_v3     / home use  / SSH tunnel from laptop
 //    corp-lab   → two VMs (PyRIT B2ms + LlamaFirewall NC4as_T4_v3)
-//                 sandbox subscription  / BeyondTrust access / no SSH tunnel
+//                 sandbox subscription  / Azure Bastion Developer SKU / no SSH tunnel
 //
 //  ⚠️  corp-lab uses Standard_NC4as_T4_v3 (GPU).
 //      This VM size requires quota approval in your subscription before deploying.
@@ -42,11 +42,11 @@ param osDiskSizeGB int = 64
 param autoShutdownTime string = '2300'
 
 @description('''
-BeyondTrust source IP/CIDR for SSH access (corp-lab only).
-Set to your BeyondTrust jump server IP, e.g. "203.0.113.10/32".
-Defaults to * (any) — restrict before deploying to production sandbox.
+Azure Bastion Developer SKU is used for SSH access to corp profile VMs.
+No CIDR parameter needed — Bastion Developer connects via Azure internal networking.
+The NSG allows SSH from the VirtualNetwork service tag only.
+Bastion Developer SKU is free and deployed automatically for corp profiles.
 ''')
-param beyondTrustSourceCIDR string = '*'
 
 // ---------------------------------------------------------------------------
 //  Profile configuration
@@ -70,8 +70,8 @@ var profileConfig = {
     autoShutdown:        true
     diskType:            'Premium_LRS'
     deployPyRITVM:       false
-    publicIP:            false               // corporate — BeyondTrust private routing
-    description:         'Corp Pre-prod — D8s_v3, mistral:7b, BeyondTrust access'
+    publicIP:            false               // corporate — Azure Bastion Developer SKU access
+    description:         'Corp Pre-prod — D8s_v3, mistral:7b, Azure Bastion access'
   }
   production: {
     llamafirewallVMSize: 'Standard_D16s_v3'
@@ -80,8 +80,8 @@ var profileConfig = {
     autoShutdown:        false
     diskType:            'Premium_LRS'
     deployPyRITVM:       false
-    publicIP:            false               // corporate — BeyondTrust private routing
-    description:         'Corp Production — D16s_v3, llama3:8b, BeyondTrust access'
+    publicIP:            false               // corporate — Azure Bastion Developer SKU access
+    description:         'Corp Production — D16s_v3, llama3:8b, Azure Bastion access'
   }
   'corp-lab': {
     llamafirewallVMSize: 'Standard_NC4as_T4_v3'  // GPU — requires quota approval
@@ -90,8 +90,8 @@ var profileConfig = {
     autoShutdown:        true
     diskType:            'Premium_LRS'
     deployPyRITVM:       true                     // deploys a second VM for PyRIT
-    publicIP:            false                    // no public IP — BeyondTrust uses private routing
-    description:         'Corp Lab — NC4as T4 GPU + PyRIT VM, BeyondTrust access, sandbox VNet'
+    publicIP:            false                    // no public IP — Azure Bastion Developer SKU access
+    description:         'Corp Lab — NC4as T4 GPU + PyRIT VM, Azure Bastion access, sandbox VNet'
   }
 }
 
@@ -238,7 +238,10 @@ resource dcrRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // ---------------------------------------------------------------------------
 //  NSG — LlamaFirewall VM
 //  home profiles: SSH from any (restrict to home IP for better security)
-//  corp-lab:      SSH from BeyondTrust only + port 8080 from PyRIT subnet
+//  All corp profiles: SSH from VirtualNetwork service tag only
+//  (Azure Bastion Developer SKU connects via Azure internal networking —
+//   no public IP or specific CIDR required)
+//  home-lab: SSH from any IP (restrict sourceAddressPrefix for production use)
 // ---------------------------------------------------------------------------
 
 resource lfNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
@@ -253,13 +256,13 @@ resource lfNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
           protocol:                 'Tcp'
           access:                   'Allow'
           direction:                'Inbound'
-          sourceAddressPrefix:      profile == 'corp-lab' ? beyondTrustSourceCIDR : '*'
+          sourceAddressPrefix:      profile == 'lab' ? '*' : 'VirtualNetwork'
           sourcePortRange:          '*'
           destinationAddressPrefix: '*'
           destinationPortRange:     '22'
-          description: profile == 'corp-lab'
-            ? 'SSH from BeyondTrust jump server only'
-            : 'SSH for admin access and PyRIT tunnel'
+          description: profile == 'lab'
+            ? 'SSH for admin access and PyRIT tunnel'
+            : 'SSH via Azure Bastion Developer SKU (VirtualNetwork service tag)'
         }
       }
       // corp-lab only: allow PyRIT VM to reach LlamaFirewall on port 8080
@@ -298,9 +301,9 @@ resource lfNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  NSG — PyRIT VM (corp-lab only)
-//  SSH from BeyondTrust only. Outbound to LlamaFirewall on 8080 is handled
-//  by the LlamaFirewall NSG allow rule above.
+//  PyRIT VM NSG (corp-lab only)
+//  SSH from VirtualNetwork service tag (Azure Bastion Developer SKU).
+//  Outbound to LlamaFirewall on 8080 is handled by the LF NSG allow rule.
 // ---------------------------------------------------------------------------
 
 resource pyritNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = if (cfg.deployPyRITVM) {
@@ -309,17 +312,17 @@ resource pyritNSG 'Microsoft.Network/networkSecurityGroups@2023-04-01' = if (cfg
   properties: {
     securityRules: [
       {
-        name: 'Allow-SSH-BeyondTrust'
+        name: 'Allow-SSH-Bastion'
         properties: {
           priority:                 100
           protocol:                 'Tcp'
           access:                   'Allow'
           direction:                'Inbound'
-          sourceAddressPrefix:      beyondTrustSourceCIDR
+          sourceAddressPrefix:      'VirtualNetwork'
           sourcePortRange:          '*'
           destinationAddressPrefix: '*'
           destinationPortRange:     '22'
-          description:              'SSH from BeyondTrust jump server only'
+          description:              'SSH via Azure Bastion Developer SKU (VirtualNetwork service tag)'
         }
       }
       {
@@ -590,6 +593,27 @@ resource pyritVM 'Microsoft.Compute/virtualMachines@2023-09-01' = if (cfg.deploy
     }
     diagnosticsProfile: {
       bootDiagnostics: { enabled: false }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Azure Bastion — Developer SKU (corp profiles only)
+//  Free tier. Provides browser-based SSH access via Azure Portal.
+//  No dedicated AzureBastionSubnet or public IP required.
+//  Limitation: 1 concurrent session per Bastion instance.
+//  Access: Portal → <VM> → Connect → Bastion
+// ---------------------------------------------------------------------------
+
+resource bastion 'Microsoft.Network/bastionHosts@2023-04-01' = if (!cfg.publicIP) {
+  name:     '${prefix}-bastion'
+  location: location
+  sku: {
+    name: 'Developer'
+  }
+  properties: {
+    virtualNetwork: {
+      id: vnet.id
     }
   }
 }
