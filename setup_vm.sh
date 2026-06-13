@@ -352,6 +352,17 @@ Environment="OUTPUT_SCAN_ENABLED=${OUTPUT_SCAN}"
 Environment="NOVA_LLM_ENABLED=${NOVA_LLM}"
 Environment="LLAMA_GUARD_DISABLED=${LLAMA_GUARD_DISABLED}"
 
+# Perplexity filter — adversarial suffix detection via GPT-2
+# Disabled by default — requires ~500 MB GPT-2 model download on first run
+Environment="PERPLEXITY_FILTER_ENABLED=0"
+Environment="PERPLEXITY_THRESHOLD=500.0"
+
+# Crescendo session tracker — multi-turn escalation detection
+Environment="CRESCENDO_ENABLED=1"
+Environment="CRESCENDO_NEAR_MISS_THRESHOLD=0.03"
+Environment="CRESCENDO_BLOCK_AFTER=3"
+Environment="CRESCENDO_SESSION_TTL=3600"
+
 # ---------------------------------------------------------------------------
 #  Prompt logging — ships full prompt to LlamaFirewallPrompts_CL in LAW.
 #  Disabled by default. Enable after configuring table-level RBAC in LAW.
