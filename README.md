@@ -799,8 +799,8 @@ git clone https://<seu-usuario-github>:<SEU_PAT>@github.com/VinnieFreitas/llamaf
 cd llamafirewall-pyrit-poc
 chmod +x *.sh
 
-# Execute o setup — detecta a localização do repositório automaticamente (sem scp necessário)
-bash setup_vm.sh --profile lab 2>&1 | tee ~/setup.log
+# Execute o setup — flag --corp força bind em 0.0.0.0 para a VM PyRIT alcançar o LF pela VNet
+bash setup_vm.sh --profile lab --corp 2>&1 | tee ~/setup.log
 
 # Após o setup — copie as regras NOVA manualmente se necessário
 sudo cp social_engineering_pt.nov /opt/llamafirewall/nova-rules-custom/

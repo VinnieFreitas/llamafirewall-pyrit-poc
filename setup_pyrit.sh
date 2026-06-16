@@ -19,12 +19,20 @@ VENV_DIR="./venv"
 log "Checking Python version..."
 PYTHON=$(command -v python3)
 PY_VERSION=$($PYTHON --version 2>&1)
+PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
 echo "  Found: ${PY_VERSION}"
 
+# Ensure python3-venv is installed — required on Ubuntu/Debian, not always present
+log "Ensuring python3-venv is available..."
+if ! python3 -m venv --help &>/dev/null 2>&1; then
+    echo "  python3.${PY_MINOR}-venv not found — installing..."
+    sudo apt-get install -y -qq "python3.${PY_MINOR}-venv"
+    ok "python3.${PY_MINOR}-venv installed."
+else
+    ok "python3-venv already available."
+fi
+
 log "Creating virtual environment at ${VENV_DIR}..."
-# Auto-install python3-venv for the current Python version
-PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-sudo apt-get install -y -qq "python3.${PY_VER}-venv" 2>/dev/null || true
 $PYTHON -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 

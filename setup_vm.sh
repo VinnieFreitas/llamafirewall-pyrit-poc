@@ -43,6 +43,13 @@ PROFILE="${1:-}"
 [[ "${PROFILE}" == "--profile" ]] && PROFILE="${2:-}"
 [[ "${PROFILE}" == --profile=* ]] && PROFILE="${PROFILE#--profile=}"
 
+# --corp flag — forces proxy to bind on 0.0.0.0 (corp-lab LlamaFirewall VM)
+# Use when running --profile lab on a VM that needs to be reached from another VM
+CORP_DEPLOY="0"
+for arg in "$@"; do
+    [[ "${arg}" == "--corp" ]] && CORP_DEPLOY="1"
+done
+
 if [[ -z "${PROFILE}" ]]; then
     echo ""
     echo -e "${CYAN}============================================================"
@@ -320,10 +327,17 @@ ok "PromptGuard 2 cached at ${INSTALL_DIR}/.cache/huggingface"
 #  Always rewrite the service file — even on re-runs — so profile changes
 #  (bind address, thresholds, output scan) take effect immediately.
 # =============================================================================
-# Bind address — home-lab uses 127.0.0.1 (SSH tunnel only)
-#                corp profiles use 0.0.0.0 (PyRIT VM reaches LF over VNet)
+
+# Bind address:
+#   home-lab (laptop PyRIT): 127.0.0.1 — SSH tunnel handles routing
+#   corp profiles (PyRIT VM on same VNet): 0.0.0.0 — direct VNet access
+#
+# The --corp flag forces 0.0.0.0 regardless of profile.
+# Use this when running --profile lab on a corp-lab LlamaFirewall VM:
+#   bash setup_vm.sh --profile lab --corp
+#
 BIND_HOST="127.0.0.1"
-if [[ "${PROFILE}" != "lab" ]]; then
+if [[ "${PROFILE}" != "lab" ]] || [[ "${CORP_DEPLOY:-0}" == "1" ]]; then
     BIND_HOST="0.0.0.0"
 fi
 

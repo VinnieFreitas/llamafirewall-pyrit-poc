@@ -1198,8 +1198,6 @@ async def chat_completions(request: Request):
                     "request_id": request_id,
                 },
             })
-                },
-            })
 
     emit_security_log(request_id, user_prompt, scan_decision, scan_score,
                       False, scan_reason, response_text,
