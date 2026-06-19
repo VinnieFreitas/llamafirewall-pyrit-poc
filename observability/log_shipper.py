@@ -247,6 +247,8 @@ def stream_live_events(shipper: LogAnalyticsShipper, vm_host: str):
                 "timestamp":      record.get("timestamp"),
                 "event_type":     record.get("event_type"),
                 "request_id":     record.get("request_id"),
+                "user_id":         record.get("user_id", ""),
+                "source":          record.get("source", "user_input"),
                 "blocked":        record.get("blocked"),
                 "scan_decision":  record.get("scan_decision"),
                 "scan_score":     record.get("scan_score"),
