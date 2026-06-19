@@ -79,9 +79,9 @@ pyrit-regression:
     - echo ""
 
     # Run full attack dataset
-    - python3 pyrit_redteam.py
+    - python3 redteam/pyrit_redteam.py
         --endpoint "${LLAMAFIREWALL_ENDPOINT}"
-        --prompts-file custom_attacks.yaml
+        --prompts-file redteam/custom_attacks.yaml
 
     # Print summary
     - echo ""
@@ -123,7 +123,7 @@ ship-to-sentinel:
     - YOUR_RUNNER_TAG_HERE    # ⚠️  same as above
   script:
     - echo "==> Shipping PyRIT results to Sentinel LAW..."
-    - python3 log_shipper.py
+    - python3 observability/log_shipper.py
         --mode pyrit
         --workspace-id "${SENTINEL_WORKSPACE_ID}"
         --workspace-key "${SENTINEL_WORKSPACE_KEY}"

@@ -14,7 +14,7 @@ GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 log() { echo -e "${CYAN}==> $*${NC}"; }
 ok()  { echo -e "${GREEN} ✓  $*${NC}"; }
 
-VENV_DIR="./venv"
+VENV_DIR="../venv"
 
 log "Checking Python version..."
 PYTHON=$(command -v python3)

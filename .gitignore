@@ -3,7 +3,7 @@
 # =============================================================================
 
 # --- Secrets & deployment outputs (NEVER commit these) ----------------------
-deploy-outputs.json          # Contains Log Analytics primary key
+infra/deploy-outputs.json  # Contains Log Analytics primary key
 *.key
 *.pem
 *.pfx
@@ -40,3 +40,4 @@ Thumbs.db
 
 # --- Azure CLI cache --------------------------------------------------------
 .azure/
+deploy-outputs.json

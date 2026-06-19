@@ -251,8 +251,8 @@ log "Deploying proxy.py..."
 PROXY_SRC=""
 if [[ -f "/home/${SERVICE_USER}/proxy.py" ]]; then
     PROXY_SRC="/home/${SERVICE_USER}/proxy.py"
-elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/proxy.py" ]]; then
-    PROXY_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/proxy.py"
+elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/firewall/proxy.py" ]]; then
+    PROXY_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/firewall/proxy.py"
 fi
 
 if [[ -n "${PROXY_SRC}" ]]; then
@@ -278,8 +278,8 @@ mkdir -p "${INSTALL_DIR}/nova-rules-custom"
 NOV_SRC=""
 if [[ -f "/home/${SERVICE_USER}/social_engineering_pt.nov" ]]; then
     NOV_SRC="/home/${SERVICE_USER}/social_engineering_pt.nov"
-elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/social_engineering_pt.nov" ]]; then
-    NOV_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/social_engineering_pt.nov"
+elif [[ -f "/home/${SERVICE_USER}/llamafirewall-pyrit-poc/redteam/social_engineering_pt.nov" ]]; then
+    NOV_SRC="/home/${SERVICE_USER}/llamafirewall-pyrit-poc/redteam/social_engineering_pt.nov"
 fi
 
 if [[ -n "${NOV_SRC}" ]]; then

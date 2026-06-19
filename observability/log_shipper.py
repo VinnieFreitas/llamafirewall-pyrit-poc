@@ -118,7 +118,7 @@ def load_config(args) -> tuple[str, str]:
     if args.workspace_id and args.workspace_key:
         return args.workspace_id, args.workspace_key
 
-    outputs_file = Path("deploy-outputs.json")
+    outputs_file = Path(__file__).parent.parent / "infra" / "deploy-outputs.json"
     if not outputs_file.exists():
         print("ERROR: deploy-outputs.json not found.")
         print("  Either copy it from the deployment step, or pass")

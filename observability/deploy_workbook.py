@@ -79,7 +79,7 @@ def load_outputs(args) -> dict:
         }
 
     # Fall back to deploy-outputs.json
-    p = Path("deploy-outputs.json")
+    p = Path(__file__).parent.parent / "infra" / "deploy-outputs.json"
     if not p.exists():
         print("ERROR: deploy-outputs.json not found and no CLI flags provided.")
         print("")
@@ -143,7 +143,7 @@ def deploy_workbook(outputs: dict, token: str) -> str:
     #  This means redeploying updates the existing workbook in-place instead
     #  of creating a new one every time.
     # ---------------------------------------------------------------------------
-    outputs_file = Path("deploy-outputs.json")
+    outputs_file = Path(__file__).parent.parent / "infra" / "deploy-outputs.json"
     outputs_data = json.loads(outputs_file.read_text())
 
     def extract(key):

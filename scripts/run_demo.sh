@@ -64,8 +64,8 @@ fi
 ok "Python environment ready."
 
 # 4. deploy-outputs.json present
-OUTPUTS_FILE="${SCRIPT_DIR}/../step1-infrastructure/deploy-outputs.json"
-[[ ! -f "${OUTPUTS_FILE}" ]] && OUTPUTS_FILE="${SCRIPT_DIR}/deploy-outputs.json"
+OUTPUTS_FILE="${SCRIPT_DIR}/../infra/deploy-outputs.json"
+[[ ! -f "${OUTPUTS_FILE}" ]] && OUTPUTS_FILE="${SCRIPT_DIR}/../infra/deploy-outputs.json"
 [[ ! -f "${OUTPUTS_FILE}" ]] && fail "deploy-outputs.json not found. Copy it from step1-infrastructure/."
 ok "deploy-outputs.json found."
 
@@ -178,7 +178,7 @@ ok "LlamaFirewall reachable at localhost:${TUNNEL_PORT}."
 log "Starting PyRIT red-team session..."
 echo ""
 
-python3 "${SCRIPT_DIR}/pyrit_redteam.py"
+python3 "${SCRIPT_DIR}/../redteam/pyrit_redteam.py"
 
 echo ""
 ok "PyRIT run complete."
@@ -188,7 +188,7 @@ ok "PyRIT run complete."
 # ---------------------------------------------------------------------------
 log "Shipping results to Azure Log Analytics..."
 
-python3 "${SCRIPT_DIR}/log_shipper.py" --mode pyrit
+python3 "${SCRIPT_DIR}/../observability/log_shipper.py" --mode pyrit
 
 ok "Results shipped to PyRITResults_CL."
 
