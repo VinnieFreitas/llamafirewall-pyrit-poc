@@ -41,3 +41,4 @@ Thumbs.db
 # --- Azure CLI cache --------------------------------------------------------
 .azure/
 deploy-outputs.json
+infra/preprod/preprod-outputs.json  # Contains preprod deployment outputs
