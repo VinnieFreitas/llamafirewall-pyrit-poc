@@ -35,6 +35,11 @@ OLLAMA_PORT=11434
 # Initialised here — overwritten after HuggingFace login in section 6
 HF_TOKEN=""
 
+# Key Vault name — set via --kv-name flag for preprod/production profiles.
+# The VM's Managed Identity must have Key Vault Secrets User role.
+# Leave empty for lab profile (uses interactive HF login instead).
+KV_NAME=""
+
 # =============================================================================
 #  PROFILE SELECTION
 # =============================================================================
@@ -48,6 +53,16 @@ PROFILE="${1:-}"
 CORP_DEPLOY="0"
 for arg in "$@"; do
     [[ "${arg}" == "--corp" ]] && CORP_DEPLOY="1"
+done
+
+# --kv-name flag — Key Vault name for preprod/production secret retrieval
+for i in "${!@}"; do
+    if [[ "${!i}" == "--kv-name" ]]; then
+        next=$((i+1))
+        KV_NAME="${!next:-}"
+    elif [[ "${!i}" == --kv-name=* ]]; then
+        KV_NAME="${!i#--kv-name=}"
+    fi
 done
 
 if [[ -z "${PROFILE}" ]]; then
@@ -76,6 +91,7 @@ case "${PROFILE}" in
         NOVA_LLM="0"
         LLAMA_GUARD_DISABLED="0"
         PROFILE_LF_INGESTION="shared_key"
+        PROFILE_HF_TOKEN=""               # updated after hf auth login in section 8
         ;;
     preprod)
         OLLAMA_MODEL="mistral:7b"
@@ -84,6 +100,7 @@ case "${PROFILE}" in
         NOVA_LLM="0"
         LLAMA_GUARD_DISABLED="0"
         PROFILE_LF_INGESTION="managed_identity"
+        PROFILE_HF_TOKEN=""               # fetched at runtime from Key Vault
         ;;
     production)
         OLLAMA_MODEL="llama3:8b"
@@ -92,6 +109,7 @@ case "${PROFILE}" in
         NOVA_LLM="1"
         LLAMA_GUARD_DISABLED="0"
         PROFILE_LF_INGESTION="managed_identity"
+        PROFILE_HF_TOKEN=""               # fetched at runtime from Key Vault
         ;;
     *)
         fail "Unknown profile '${PROFILE}'. Use: lab | preprod | production"
@@ -291,20 +309,75 @@ else
 fi
 
 # =============================================================================
-#  8. HUGGINGFACE LOGIN + PROMPTGUARD 2 PRE-DOWNLOAD
+#  8. SECRET RETRIEVAL + PROMPTGUARD 2 PRE-DOWNLOAD
+#
+#  lab:               interactive HuggingFace login (no Key Vault required)
+#  preprod/production: fetch HF_TOKEN from Key Vault via Managed Identity
+#                      (no interactive login, no static credentials on disk)
 # =============================================================================
-log "HuggingFace login required for PromptGuard 2 model download."
-echo ""
-echo "  ► Accept the model licence first (if you haven't):"
-echo "    https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M"
-echo "  ► Get your token:"
-echo "    https://huggingface.co/settings/tokens"
-echo ""
 
-hf auth login
+if [[ "${PROFILE}" == "lab" ]]; then
+    # ---------------------------------------------------------------------------
+    #  Lab profile — interactive HuggingFace login (unchanged)
+    # ---------------------------------------------------------------------------
+    log "HuggingFace login required for PromptGuard 2 model download."
+    echo ""
+    echo "  ► Accept the model licence first (if you haven't):"
+    echo "    https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M"
+    echo "  ► Get your token:"
+    echo "    https://huggingface.co/settings/tokens"
+    echo ""
 
-HF_TOKEN=$(cat ~/.cache/huggingface/token 2>/dev/null || true)
-[[ -z "${HF_TOKEN}" ]] && fail "Could not read HuggingFace token after login."
+    hf auth login
+
+    HF_TOKEN=$(cat ~/.cache/huggingface/token 2>/dev/null || true)
+    [[ -z "${HF_TOKEN}" ]] && fail "Could not read HuggingFace token after login."
+
+else
+    # ---------------------------------------------------------------------------
+    #  Corp profiles (preprod/production) — fetch secrets from Key Vault
+    #  via Managed Identity. No interactive login. No static credentials.
+    # ---------------------------------------------------------------------------
+    [[ -z "${KV_NAME}" ]] && fail "Key Vault name required for ${PROFILE} profile.\n  Re-run with: --kv-name <your-kv-name>\n  Find it in: infra/preprod/preprod-outputs.json"
+
+    log "Fetching secrets from Key Vault '${KV_NAME}' via Managed Identity..."
+
+    # Verify Managed Identity is available (IMDS endpoint must be reachable)
+    IMDS_CHECK=$(curl -sf --max-time 5         -H "Metadata: true"         "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net"         2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('ok' if d.get('access_token') else 'fail')" 2>/dev/null || echo "fail")
+
+    [[ "${IMDS_CHECK}" != "ok" ]] && fail "Managed Identity token fetch failed.\n  Ensure the VM has System-Assigned Managed Identity and Key Vault Secrets User role."
+
+    ok "Managed Identity token verified."
+
+    # Install azure-cli on VM if not present (needed for keyvault secret show)
+    if ! command -v az &>/dev/null; then
+        log "Installing Azure CLI on VM..."
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash -s -- -y
+        ok "Azure CLI installed."
+    fi
+
+    # Authenticate CLI using Managed Identity
+    az login --identity --allow-no-subscriptions --output none 2>/dev/null
+    ok "Azure CLI authenticated via Managed Identity."
+
+    # Fetch HF token
+    log "Fetching hf-token from Key Vault..."
+    HF_TOKEN=$(az keyvault secret show         --vault-name "${KV_NAME}"         --name "hf-token"         --query "value"         --output tsv 2>/dev/null || true)
+    [[ -z "${HF_TOKEN}" ]] && fail "Could not fetch 'hf-token' from Key Vault '${KV_NAME}'.\n  Populate it first:\n  az keyvault secret set --vault-name ${KV_NAME} --name hf-token --value <hf_xxx>"
+    ok "hf-token retrieved."
+
+    # Fetch LAW Workspace ID (needed for DCR ingestion)
+    log "Fetching sentinel-law-id from Key Vault..."
+    LAW_WORKSPACE_ID_KV=$(az keyvault secret show         --vault-name "${KV_NAME}"         --name "sentinel-law-id"         --query "value"         --output tsv 2>/dev/null || true)
+    [[ -z "${LAW_WORKSPACE_ID_KV}" ]] && warn "Could not fetch 'sentinel-law-id' — prompt logging will be disabled until populated."
+
+    # Fetch Foundry API key (optional — may use Managed Identity auth to Foundry instead)
+    log "Fetching foundry-api-key from Key Vault..."
+    FOUNDRY_API_KEY=$(az keyvault secret show         --vault-name "${KV_NAME}"         --name "foundry-api-key"         --query "value"         --output tsv 2>/dev/null || true)
+    [[ -z "${FOUNDRY_API_KEY}" ]] && warn "Could not fetch 'foundry-api-key' — LlamaFirewall will use Managed Identity auth to Foundry."
+
+    ok "Key Vault secret retrieval complete."
+fi
 
 log "Pre-downloading PromptGuard 2 model (~170 MB)..."
 HF_HOME="${INSTALL_DIR}/.cache/huggingface" \
@@ -341,6 +414,9 @@ if [[ "${PROFILE}" != "lab" ]] || [[ "${CORP_DEPLOY:-0}" == "1" ]]; then
     BIND_HOST="0.0.0.0"
 fi
 
+# Update PROFILE_HF_TOKEN for lab now that HF_TOKEN is set (section 8 has run)
+[[ "${PROFILE}" == "lab" ]] && PROFILE_HF_TOKEN="${HF_TOKEN}"
+
 log "Creating llamafirewall.service (profile: ${PROFILE}, bind: ${BIND_HOST})..."
 
 # Stop any running instance before rewriting the service file
@@ -359,7 +435,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${INSTALL_DIR}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="HF_HOME=${INSTALL_DIR}/.cache/huggingface"
-Environment="HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}"
+Environment="HUGGING_FACE_HUB_TOKEN=${PROFILE_HF_TOKEN}"
 Environment="LLAMAFIREWALL_PROFILE=${PROFILE}"
 Environment="PROMPTGUARD_THRESHOLD=${PG_THRESHOLD}"
 Environment="OUTPUT_SCAN_ENABLED=${OUTPUT_SCAN}"
@@ -400,11 +476,9 @@ Environment="DCE_ENDPOINT="
 Environment="DCR_IMMUTABLE_ID="
 Environment="DCR_STREAM_NAME=Custom-LlamaFirewallPrompts_CL"
 
-ExecStart=${INSTALL_DIR}/venv/bin/uvicorn proxy:app \
-    --host ${BIND_HOST} \
-    --port ${FIREWALL_PORT} \
-    --workers 1 \
-    --log-level warning
+ExecStart=${INSTALL_DIR}/start.sh
+
+
 
 Restart=on-failure
 RestartSec=10
@@ -415,6 +489,89 @@ SyslogIdentifier=llamafirewall
 [Install]
 WantedBy=multi-user.target
 SERVICE_EOF
+
+# =============================================================================
+#  9b. GENERATE START WRAPPER SCRIPT
+#  For lab: starts uvicorn directly (HF_TOKEN already in systemd env).
+#  For preprod/production: fetches secrets from Key Vault at each service
+#  start via Managed Identity — no static credentials ever written to disk.
+# =============================================================================
+log "Generating start wrapper: ${INSTALL_DIR}/start.sh..."
+
+if [[ "${PROFILE}" == "lab" ]]; then
+    # Lab: simple direct launch — HF_TOKEN already in systemd Environment= line
+    sudo tee "${INSTALL_DIR}/start.sh" > /dev/null << 'WRAPPER_EOF'
+#!/usr/bin/env bash
+# LlamaFirewall start wrapper — lab profile
+# Secrets are baked into systemd Environment= lines for simplicity.
+set -euo pipefail
+cd /opt/llamafirewall
+exec /opt/llamafirewall/venv/bin/uvicorn proxy:app     --host "${BIND_HOST:-127.0.0.1}"     --port "${FIREWALL_PORT:-8080}"     --workers 1     --log-level warning
+WRAPPER_EOF
+
+else
+    # Corp profiles: fetch secrets from Key Vault at start time via MI
+    # KV_NAME is written into the wrapper — it is not a secret (vault name is not sensitive)
+    sudo tee "${INSTALL_DIR}/start.sh" > /dev/null << WRAPPER_EOF
+#!/usr/bin/env bash
+# =============================================================================
+#  LlamaFirewall start wrapper — ${PROFILE} profile
+#  Fetches secrets from Key Vault '${KV_NAME}' via Managed Identity at start.
+#  No static credentials are stored on disk or in systemd unit files.
+# =============================================================================
+set -euo pipefail
+
+KV_NAME="${KV_NAME}"
+INSTALL_DIR="/opt/llamafirewall"
+
+log() { echo "[\$(date +%H:%M:%S)] \$*"; }
+fail() { echo "ERROR: \$*" >&2; exit 1; }
+
+log "Fetching secrets from Key Vault '\${KV_NAME}'..."
+
+# Authenticate CLI via Managed Identity (token cached by Azure CLI)
+az login --identity --allow-no-subscriptions --output none 2>/dev/null
+
+# HuggingFace token
+HF_TOKEN=\$(az keyvault secret show \
+    --vault-name "\${KV_NAME}" \
+    --name "hf-token" \
+    --query "value" --output tsv 2>/dev/null || true)
+[[ -z "\${HF_TOKEN}" ]] && fail "hf-token not found in Key Vault '\${KV_NAME}'"
+
+# Foundry API key (optional — empty string if using MI auth to Foundry)
+FOUNDRY_API_KEY=\$(az keyvault secret show \
+    --vault-name "\${KV_NAME}" \
+    --name "foundry-api-key" \
+    --query "value" --output tsv 2>/dev/null || true)
+
+# LAW Workspace ID for shared_key ingestion (lab fallback only — preprod uses MI)
+LAW_WORKSPACE_ID_SECRET=\$(az keyvault secret show \
+    --vault-name "\${KV_NAME}" \
+    --name "sentinel-law-id" \
+    --query "value" --output tsv 2>/dev/null || true)
+
+log "Secrets retrieved. Starting LlamaFirewall..."
+
+# Export and exec — secrets live only in process environment, never on disk
+export HUGGING_FACE_HUB_TOKEN="\${HF_TOKEN}"
+export HF_HOME="\${INSTALL_DIR}/.cache/huggingface"
+[[ -n "\${FOUNDRY_API_KEY}" ]] && export OPENAI_API_KEY="\${FOUNDRY_API_KEY}"
+[[ -n "\${LAW_WORKSPACE_ID_SECRET}" ]] && export LAW_WORKSPACE_ID="\${LAW_WORKSPACE_ID_SECRET}"
+
+cd "\${INSTALL_DIR}"
+exec "\${INSTALL_DIR}/venv/bin/uvicorn" proxy:app \
+    --host "\${BIND_HOST:-0.0.0.0}" \
+    --port "\${FIREWALL_PORT:-8080}" \
+    --workers 1 \
+    --log-level warning
+WRAPPER_EOF
+
+fi
+
+sudo chmod +x "${INSTALL_DIR}/start.sh"
+sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}/start.sh"
+ok "start.sh generated."
 
 sudo systemctl daemon-reload
 sudo systemctl enable llamafirewall --quiet
