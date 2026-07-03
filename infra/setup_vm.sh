@@ -40,6 +40,11 @@ HF_TOKEN=""
 # Leave empty for lab profile (uses interactive HF login instead).
 KV_NAME=""
 
+# Foundry endpoint — set via --foundry-endpoint flag for preprod/production.
+# Format: https://<resource>.openai.azure.com
+# Leave empty for lab profile (uses Ollama instead).
+FOUNDRY_ENDPOINT=""
+
 # =============================================================================
 #  PROFILE SELECTION
 # =============================================================================
@@ -56,12 +61,18 @@ for arg in "$@"; do
 done
 
 # --kv-name flag — Key Vault name for preprod/production secret retrieval
+# --foundry-endpoint flag — Foundry base URL for preprod/production
 for i in "${!@}"; do
     if [[ "${!i}" == "--kv-name" ]]; then
         next=$((i+1))
         KV_NAME="${!next:-}"
     elif [[ "${!i}" == --kv-name=* ]]; then
         KV_NAME="${!i#--kv-name=}"
+    elif [[ "${!i}" == "--foundry-endpoint" ]]; then
+        next=$((i+1))
+        FOUNDRY_ENDPOINT="${!next:-}"
+    elif [[ "${!i}" == --foundry-endpoint=* ]]; then
+        FOUNDRY_ENDPOINT="${!i#--foundry-endpoint=}"
     fi
 done
 
@@ -101,6 +112,8 @@ case "${PROFILE}" in
         LLAMA_GUARD_DISABLED="0"
         PROFILE_LF_INGESTION="managed_identity"
         PROFILE_HF_TOKEN=""               # fetched at runtime from Key Vault
+        # Default Foundry endpoint for preprod — override with --foundry-endpoint
+        [[ -z "${FOUNDRY_ENDPOINT}" ]] && FOUNDRY_ENDPOINT="https://safra-nprod-aif-eastus2.openai.azure.com"
         ;;
     production)
         OLLAMA_MODEL="llama3:8b"
@@ -110,6 +123,8 @@ case "${PROFILE}" in
         LLAMA_GUARD_DISABLED="0"
         PROFILE_LF_INGESTION="managed_identity"
         PROFILE_HF_TOKEN=""               # fetched at runtime from Key Vault
+        # Default Foundry endpoint for production — override with --foundry-endpoint
+        [[ -z "${FOUNDRY_ENDPOINT}" ]] && FOUNDRY_ENDPOINT="https://safra-prod-aif-eastus2.openai.azure.com"
         ;;
     *)
         fail "Unknown profile '${PROFILE}'. Use: lab | preprod | production"
@@ -122,6 +137,7 @@ echo "  LLM model        : ${OLLAMA_MODEL}"
 echo "  PG threshold     : ${PG_THRESHOLD}"
 echo "  Output scanning  : ${OUTPUT_SCAN}"
 echo "  NOVA LLM tier    : ${NOVA_LLM}"
+echo "  Foundry endpoint : ${FOUNDRY_ENDPOINT:-Ollama (lab)}"
 echo ""
 
 # =============================================================================
@@ -338,6 +354,7 @@ else
     #  Corp profiles (preprod/production) — fetch secrets from Key Vault
     #  via Managed Identity. No interactive login. No static credentials.
     # ---------------------------------------------------------------------------
+    [[ -z "${FOUNDRY_ENDPOINT}" ]] && fail "Foundry endpoint required for ${PROFILE} profile.\n  Re-run with: --foundry-endpoint https://<resource>.openai.azure.com"
     [[ -z "${KV_NAME}" ]] && fail "Key Vault name required for ${PROFILE} profile.\n  Re-run with: --kv-name <your-kv-name>\n  Find it in: infra/preprod/preprod-outputs.json"
 
     log "Fetching secrets from Key Vault '${KV_NAME}' via Managed Identity..."
@@ -472,6 +489,9 @@ Environment="AZURE_LANGUAGE_KEY="
 #  preprod/production: managed_identity (Entra ID token from IMDS, no keys)
 # ---------------------------------------------------------------------------
 Environment="LAW_INGESTION_METHOD=${PROFILE_LF_INGESTION}"
+# Foundry endpoint — proxy.py reads this at startup to determine backend target.
+# Empty string = use Ollama (lab). Non-empty + preprod/production = use Foundry.
+Environment="FOUNDRY_ENDPOINT=${FOUNDRY_ENDPOINT}"
 Environment="DCE_ENDPOINT="
 Environment="DCR_IMMUTABLE_ID="
 Environment="DCR_STREAM_NAME=Custom-LlamaFirewallPrompts_CL"
