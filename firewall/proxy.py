@@ -663,8 +663,30 @@ OUTPUT_SCAN_ENABLED = os.environ.get("OUTPUT_SCAN_ENABLED", "0").strip() == "1"
 # ---------------------------------------------------------------------------
 BYPASS_MODE = os.environ.get("BYPASS_MODE", "0").strip() == "1"
 
+# ---------------------------------------------------------------------------
+#  AUDIT MODE
+#  When enabled, the full scanner stack runs as normal — but BLOCK decisions
+#  are not enforced. Traffic is forwarded to Foundry regardless of scan result.
+#  The scan decision (WOULD_BLOCK / WOULD_ALLOW) is logged to Sentinel and
+#  returned in x_llamafirewall metadata so the caller can observe it.
+#
+#  Use this during initial deployment to validate detection accuracy before
+#  enabling enforcement. Set a concrete exit criterion before enabling:
+#  e.g. "false positive rate < 1% over 2 weeks → flip to enforcement".
+#
+#  Enable:  sudo systemctl set-environment AUDIT_MODE=1
+#           sudo systemctl restart llamafirewall
+#  Disable: sudo systemctl unset-environment AUDIT_MODE
+#           sudo systemctl restart llamafirewall
+#
+#  Or use:  ./scripts/toggle_audit.sh on|off|status azureuser@<vm-fqdn>
+# ---------------------------------------------------------------------------
+AUDIT_MODE = os.environ.get("AUDIT_MODE", "0").strip() == "1"
+
 if BYPASS_MODE:
-    logger.warning("⚠️  BYPASS MODE ENABLED — all scanning disabled, prompts forwarded directly to Ollama")
+    logger.warning("⚠️  BYPASS MODE ENABLED — all scanning disabled, prompts forwarded directly to Foundry/Ollama")
+elif AUDIT_MODE:
+    logger.warning("⚠️  AUDIT MODE ENABLED — scanning active but blocks NOT enforced. Log only.")
 else:
     logger.info(f"Profile: {PROFILE} | PG threshold: {BLOCK_THRESHOLD} | Output scan: {OUTPUT_SCAN_ENABLED}")
 
@@ -1159,31 +1181,59 @@ async def chat_completions(request: Request):
 
     if blocked:
         latency = (time.monotonic() - t_start) * 1000
-        emit_security_log(request_id, user_prompt, scan_decision, scan_score,
-                          True, scan_reason, latency_ms=latency,
-                          user_id=user_id, source=source)
-        asyncio.create_task(_ship_prompt_to_law(
-            request_id, user_prompt, messages,
-            scan_decision, scan_score, scan_reason, True, latency,
-            user_id=user_id, source=source
-        ))
-        return JSONResponse(content={
-            "id":      f"chatcmpl-{request_id}",
-            "object":  "chat.completion",
-            "model":   body.get("model", OLLAMA_MODEL),
-            "choices": [{"index": 0, "message": {
-                "role":    "assistant",
-                "content": "[BLOCKED by LlamaFirewall — threat detected]",
-            }, "finish_reason": "content_filter"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            "x_llamafirewall": {
-                "blocked":    True,
-                "decision":   scan_decision,
-                "score":      scan_score,
-                "reason":     scan_reason[:200],
-                "request_id": request_id,
-            },
-        })
+
+        if AUDIT_MODE:
+            # ------------------------------------------------------------------
+            #  AUDIT MODE — log the would-be block but forward traffic anyway.
+            #  scan_decision becomes WOULD_BLOCK so KQL can distinguish audit
+            #  detections from real enforced blocks.
+            # ------------------------------------------------------------------
+            audit_decision = f"WOULD_{scan_decision}"  # e.g. WOULD_BLOCK
+            emit_security_log(request_id, user_prompt, audit_decision, scan_score,
+                              False, scan_reason, latency_ms=latency,
+                              user_id=user_id, source=source)
+            asyncio.create_task(_ship_prompt_to_law(
+                request_id, user_prompt, messages,
+                audit_decision, scan_score, scan_reason,
+                False,   # blocked=False — traffic passes through in audit mode
+                latency,
+                user_id=user_id, source=source
+            ))
+            logger.warning(
+                f"AUDIT MODE: would have blocked {request_id} "
+                f"(decision={scan_decision}, score={scan_score:.4f})"
+            )
+            # Fall through — traffic continues to backend below
+
+        else:
+            # ------------------------------------------------------------------
+            #  ENFORCEMENT MODE — block and return error response.
+            # ------------------------------------------------------------------
+            emit_security_log(request_id, user_prompt, scan_decision, scan_score,
+                              True, scan_reason, latency_ms=latency,
+                              user_id=user_id, source=source)
+            asyncio.create_task(_ship_prompt_to_law(
+                request_id, user_prompt, messages,
+                scan_decision, scan_score, scan_reason, True, latency,
+                user_id=user_id, source=source
+            ))
+            return JSONResponse(content={
+                "id":      f"chatcmpl-{request_id}",
+                "object":  "chat.completion",
+                "model":   body.get("model", OLLAMA_MODEL),
+                "choices": [{"index": 0, "message": {
+                    "role":    "assistant",
+                    "content": "[BLOCKED by LlamaFirewall — threat detected]",
+                }, "finish_reason": "content_filter"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "x_llamafirewall": {
+                    "blocked":    True,
+                    "decision":   scan_decision,
+                    "score":      scan_score,
+                    "reason":     scan_reason[:200],
+                    "request_id": request_id,
+                },
+            })
 
     # Forward to Ollama — or return a stub if NO_LLM mode is on
     if NO_LLM:
@@ -1207,6 +1257,7 @@ async def chat_completions(request: Request):
                 "reason":     scan_reason[:200],
                 "request_id": request_id,
                 "no_llm":     True,
+                "audit_mode": AUDIT_MODE,
             },
         })
 
@@ -1344,6 +1395,7 @@ async def chat_completions(request: Request):
         "score":      scan_score,
         "reason":     scan_reason[:200],
         "request_id": request_id,
+        "audit_mode": AUDIT_MODE,
     }
     return JSONResponse(content=ollama_body)
 
@@ -1387,6 +1439,7 @@ async def health():
         "pg_threshold":        BLOCK_THRESHOLD,
         "output_scan":         OUTPUT_SCAN_ENABLED,
         "bypass_mode":         BYPASS_MODE,
+        "audit_mode":          AUDIT_MODE,
         "backend":             f"foundry:{FOUNDRY_ENDPOINT}" if USE_FOUNDRY else f"ollama:{OLLAMA_BASE_URL}",
         "prompt_logging":      PROMPT_LOGGING_ENABLED,
         "pii_redaction":       PII_REDACTION_ENABLED,
