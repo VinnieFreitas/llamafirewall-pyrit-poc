@@ -1,10 +1,17 @@
 """
 LlamaFirewall Proxy — OpenAI-compatible endpoint on :8080
 
-Sits between PyRIT (caller) and Ollama (LLM backend).
-Accepts /v1/chat/completions requests, scans with a layered scanner stack,
-forwards clean prompts to Ollama, and returns structured responses
-with x_llamafirewall metadata attached.
+Sits between the NestJS AI Portal and Azure AI Foundry.
+Accepts /v1/chat/completions and /v1/embeddings requests.
+  - chat/completions: scanned through full layered scanner stack,
+    clean prompts forwarded to Foundry, responses returned with
+    x_llamafirewall metadata attached.
+  - embeddings: passed through unscanned (vector data, not natural language).
+
+Backend target: Azure AI Foundry (OpenAI-compatible endpoint)
+  lab:     Ollama localhost (no Foundry access needed)
+  preprod: safra-nprod-aif-eastus2.openai.azure.com
+  prod:    safra-prod-aif-eastus2.openai.azure.com
 
 Scanner stack (input):
   1. PromptGuard 2      — prompt injection / jailbreak detection (threshold 0.05)
@@ -598,8 +605,31 @@ if CRESCENDO_ENABLED:
 
 logger.info(f"LlamaFirewall ready — {len(active_scanners)} scanners active: {active_scanners}")
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "phi3:mini"
+# ---------------------------------------------------------------------------
+#  Backend target configuration
+#
+#  lab:               Ollama running locally (no Foundry needed)
+#  preprod/production: Azure AI Foundry OpenAI-compatible endpoint
+#
+#  FOUNDRY_ENDPOINT  : base URL of the Foundry resource
+#                      e.g. https://safra-nprod-aif-eastus2.openai.azure.com
+#  FOUNDRY_API_KEY   : Foundry API key (fetched from Key Vault by start.sh)
+#                      leave empty to use Managed Identity auth instead
+#  OLLAMA_BASE_URL   : used in lab profile only
+#  OLLAMA_MODEL      : default model for lab profile
+# ---------------------------------------------------------------------------
+OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL",   "http://localhost:11434").strip()
+OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",      "phi3:mini").strip()
+FOUNDRY_ENDPOINT  = os.environ.get("FOUNDRY_ENDPOINT",  "").strip()
+FOUNDRY_API_KEY   = os.environ.get("OPENAI_API_KEY",    "").strip()  # set by start.sh from KV
+
+# Resolve whether this instance forwards to Foundry or Ollama
+USE_FOUNDRY = bool(FOUNDRY_ENDPOINT) and PROFILE in ("preprod", "production")
+
+if USE_FOUNDRY:
+    logger.info(f"Backend: Azure AI Foundry → {FOUNDRY_ENDPOINT}")
+else:
+    logger.info(f"Backend: Ollama → {OLLAMA_BASE_URL} (model: {OLLAMA_MODEL})")
 
 # ---------------------------------------------------------------------------
 #  Profile-aware configuration — read from systemd environment
@@ -802,7 +832,30 @@ async def _ship_prompt_to_law(
         return
 
     try:
-        prompt_to_log = await _redact_pii(prompt)
+        # ----------------------------------------------------------------
+        #  Option 2 logging policy:
+        #  BLOCK decisions → log full prompt (forensic trail for incidents)
+        #  ALLOW decisions → log user message only + message count
+        #                    (no RAG chunk content, reduces LAW cost ~99%)
+        # ----------------------------------------------------------------
+        if blocked:
+            prompt_to_log = await _redact_pii(prompt)
+        else:
+            # Extract only the last user message — not RAG chunks or system prompt
+            user_msg_only = ""
+            for msg in reversed(full_messages):
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content_val = msg.get("content", "")
+                    if isinstance(content_val, str):
+                        user_msg_only = content_val[:500]  # cap at 500 chars for ALLOW
+                    elif isinstance(content_val, list):
+                        # Handle content array format (text + image parts)
+                        user_msg_only = " ".join(
+                            p.get("text", "") for p in content_val
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        )[:500]
+                    break
+            prompt_to_log = user_msg_only
 
         record = [{
             "TimeGenerated": datetime.now(timezone.utc).isoformat(),
@@ -810,7 +863,7 @@ async def _ship_prompt_to_law(
             "user_id":       user_id,
             "source":        source,
             "profile":       PROFILE,
-            "full_prompt":   prompt_to_log,
+            "full_prompt":   prompt_to_log,   # full only on BLOCK; user msg only on ALLOW
             "prompt_length": len(prompt),
             "message_count": len(full_messages),
             "scan_decision": scan_decision,
@@ -818,7 +871,7 @@ async def _ship_prompt_to_law(
             "scan_reason":   scan_reason[:500] if scan_reason else "",
             "blocked":       blocked,
             "latency_ms":    round(latency_ms, 1),
-            "pii_redacted":  PII_REDACTION_ENABLED,
+            "pii_redacted":  PII_REDACTION_ENABLED and blocked,  # only redact when logging full
         }]
 
         body = json.dumps(record).encode("utf-8")
@@ -875,6 +928,85 @@ async def _ship_prompt_to_law(
 
     except Exception as e:
         logger.warning(f"Prompt log ship error: {e}")
+
+# ---------------------------------------------------------------------------
+#  Backend forwarding helper
+#  Routes to Foundry (preprod/production) or Ollama (lab).
+#  Preserves the caller's model/deployment name exactly as received.
+#  Handles auth:
+#    Foundry + API key:        Authorization: Bearer <key>
+#    Foundry + MI (no key):    Authorization: Bearer <IMDS token>
+#    Ollama:                   no auth header
+# ---------------------------------------------------------------------------
+
+async def _forward_to_backend(
+    messages: list,
+    model: str,
+    extra_body: dict | None = None,
+) -> httpx.Response:
+    """
+    Forward a chat/completions request to Foundry or Ollama.
+    Returns the raw httpx.Response — caller handles error checking.
+    """
+    request_body = {"messages": messages, "stream": False, **(extra_body or {})}
+
+    if USE_FOUNDRY:
+        # Foundry OpenAI-compatible path:
+        # POST /openai/deployments/<deployment-name>/chat/completions?api-version=...
+        # The deployment name comes from the caller's model field.
+        deployment = model or "gpt-4o"
+        url = (
+            f"{FOUNDRY_ENDPOINT}/openai/deployments/{deployment}"
+            f"/chat/completions?api-version=2024-10-21"
+        )
+        headers = {"Content-Type": "application/json"}
+
+        if FOUNDRY_API_KEY:
+            # Key-based auth (Key Vault → start.sh → OPENAI_API_KEY env var)
+            headers["Authorization"] = f"Bearer {FOUNDRY_API_KEY}"
+            headers["api-key"] = FOUNDRY_API_KEY  # some Foundry versions use this header
+        else:
+            # Managed Identity auth — fetch token from IMDS
+            mi_token = await _get_managed_identity_token()
+            headers["Authorization"] = f"Bearer {mi_token}"
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await client.post(url, json=request_body, headers=headers)
+    else:
+        # Lab profile — Ollama
+        url = f"{OLLAMA_BASE_URL}/v1/chat/completions"
+        request_body["model"] = model or OLLAMA_MODEL
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await client.post(url, json=request_body)
+
+
+async def _forward_embeddings_to_backend(
+    body: dict,
+) -> httpx.Response:
+    """
+    Pass embedding requests through to Foundry or Ollama unscanned.
+    Embeddings are vector operations — not natural language, not scannable.
+    """
+    if USE_FOUNDRY:
+        model = body.get("model", "text-embedding-3-small")
+        url = (
+            f"{FOUNDRY_ENDPOINT}/openai/deployments/{model}"
+            f"/embeddings?api-version=2024-10-21"
+        )
+        headers = {"Content-Type": "application/json"}
+        if FOUNDRY_API_KEY:
+            headers["Authorization"] = f"Bearer {FOUNDRY_API_KEY}"
+            headers["api-key"] = FOUNDRY_API_KEY
+        else:
+            mi_token = await _get_managed_identity_token()
+            headers["Authorization"] = f"Bearer {mi_token}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            return await client.post(url, json=body, headers=headers)
+    else:
+        url = f"{OLLAMA_BASE_URL}/v1/embeddings"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            return await client.post(url, json=body)
+
 
 app = FastAPI(title="LlamaFirewall Proxy", version="0.1.0")
 
@@ -942,7 +1074,7 @@ async def chat_completions(request: Request):
             return JSONResponse(content={
                 "id":      f"chatcmpl-{request_id}",
                 "object":  "chat.completion",
-                "model":   OLLAMA_MODEL,
+                "model":   body.get("model", OLLAMA_MODEL),
                 "choices": [{"index": 0, "message": {
                     "role": "assistant",
                     "content": "[BYPASS MODE + NO_LLM — scanning and LLM both disabled]",
@@ -950,15 +1082,13 @@ async def chat_completions(request: Request):
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 "x_llamafirewall": {"bypass_mode": True, "request_id": request_id},
             })
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            bypass_resp = await client.post(
-                f"{OLLAMA_BASE_URL}/v1/chat/completions",
-                json={"model": body.get("model", OLLAMA_MODEL),
-                      "messages": messages, "stream": False},
-            )
+        bypass_resp = await _forward_to_backend(
+            messages=messages,
+            model=body.get("model", OLLAMA_MODEL),
+        )
         if bypass_resp.status_code != 200:
             raise HTTPException(status_code=bypass_resp.status_code,
-                                detail=f"Ollama error: {bypass_resp.text}")
+                                detail=f"Backend error: {bypass_resp.text}")
         bypass_body = bypass_resp.json()
         bypass_body["x_llamafirewall"] = {
             "bypass_mode": True, "request_id": request_id
@@ -1040,7 +1170,7 @@ async def chat_completions(request: Request):
         return JSONResponse(content={
             "id":      f"chatcmpl-{request_id}",
             "object":  "chat.completion",
-            "model":   OLLAMA_MODEL,
+            "model":   body.get("model", OLLAMA_MODEL),
             "choices": [{"index": 0, "message": {
                 "role":    "assistant",
                 "content": "[BLOCKED by LlamaFirewall — threat detected]",
@@ -1064,7 +1194,7 @@ async def chat_completions(request: Request):
         return JSONResponse(content={
             "id":      f"chatcmpl-{request_id}",
             "object":  "chat.completion",
-            "model":   OLLAMA_MODEL,
+            "model":   body.get("model", OLLAMA_MODEL),
             "choices": [{"index": 0, "message": {
                 "role":    "assistant",
                 "content": "[ALLOWED by LlamaFirewall — LLM call skipped in NO_LLM mode]",
@@ -1080,18 +1210,16 @@ async def chat_completions(request: Request):
             },
         })
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        ollama_resp = await client.post(
-            f"{OLLAMA_BASE_URL}/v1/chat/completions",
-            json={"model": body.get("model", OLLAMA_MODEL),
-                  "messages": messages, "stream": False},
-        )
+    backend_resp = await _forward_to_backend(
+        messages=messages,
+        model=body.get("model", OLLAMA_MODEL),
+    )
 
-    if ollama_resp.status_code != 200:
-        raise HTTPException(status_code=ollama_resp.status_code,
-                            detail=f"Ollama error: {ollama_resp.text}")
+    if backend_resp.status_code != 200:
+        raise HTTPException(status_code=backend_resp.status_code,
+                            detail=f"Backend error: {backend_resp.text}")
 
-    ollama_body   = ollama_resp.json()
+    ollama_body   = backend_resp.json()
     response_text = ""
     try:
         response_text = ollama_body["choices"][0]["message"]["content"]
@@ -1118,7 +1246,7 @@ async def chat_completions(request: Request):
             return JSONResponse(content={
                 "id":      f"chatcmpl-{request_id}",
                 "object":  "chat.completion",
-                "model":   OLLAMA_MODEL,
+                "model":   body.get("model", OLLAMA_MODEL),
                 "choices": [{"index": 0, "message": {
                     "role":    "assistant",
                     "content": "[BLOCKED by LlamaFirewall — unsafe response detected]",
@@ -1153,7 +1281,7 @@ async def chat_completions(request: Request):
                 return JSONResponse(content={
                     "id":      f"chatcmpl-{request_id}",
                     "object":  "chat.completion",
-                    "model":   OLLAMA_MODEL,
+                    "model":   body.get("model", OLLAMA_MODEL),
                     "choices": [{"index": 0, "message": {
                         "role":    "assistant",
                         "content": "[BLOCKED by LlamaFirewall — malicious code detected in response]",
@@ -1185,7 +1313,7 @@ async def chat_completions(request: Request):
             return JSONResponse(content={
                 "id":      f"chatcmpl-{request_id}",
                 "object":  "chat.completion",
-                "model":   OLLAMA_MODEL,
+                "model":   body.get("model", OLLAMA_MODEL),
                 "choices": [{"index": 0, "message": {
                     "role":    "assistant",
                     "content": "[BLOCKED by LlamaFirewall — sensitive data detected in response]",
@@ -1223,6 +1351,33 @@ async def chat_completions(request: Request):
 #  GET /health
 # ---------------------------------------------------------------------------
 
+@app.post("/v1/embeddings")
+async def embeddings(request: Request):
+    """
+    Passthrough for embedding requests — not scanned.
+    Embeddings are vector operations on text, not natural language prompts.
+    Scanning them would produce meaningless results and add latency.
+    Requests are forwarded directly to Foundry or Ollama.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    request_id = str(uuid.uuid4())
+    logger.info(f"Embedding passthrough {request_id} model={body.get('model','unknown')}")
+
+    resp = await _forward_embeddings_to_backend(body)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Backend embedding error: {resp.text}"
+        )
+
+    return JSONResponse(content=resp.json())
+
+
 @app.get("/health")
 async def health():
     return {
@@ -1232,6 +1387,7 @@ async def health():
         "pg_threshold":        BLOCK_THRESHOLD,
         "output_scan":         OUTPUT_SCAN_ENABLED,
         "bypass_mode":         BYPASS_MODE,
+        "backend":             f"foundry:{FOUNDRY_ENDPOINT}" if USE_FOUNDRY else f"ollama:{OLLAMA_BASE_URL}",
         "prompt_logging":      PROMPT_LOGGING_ENABLED,
         "pii_redaction":       PII_REDACTION_ENABLED,
         "perplexity_filter":   PERPLEXITY_FILTER_ENABLED and _perplexity_model is not None,
