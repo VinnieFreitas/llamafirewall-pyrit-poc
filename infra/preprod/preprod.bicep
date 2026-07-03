@@ -2,7 +2,7 @@
 //  LlamaFirewall — Corp Preprod Infrastructure
 //  Target: NonProduction subscription / eastus / RG-LLAMAFIREWALL-NPRD
 //
-//  VM:       Standard_NC8as_T4_v3 (8 vCPU, 56GB RAM, 1× T4 16GB VRAM)
+//  VM:       Standard_NC4as_T4_v3 (8 vCPU, 56GB RAM, 1× T4 16GB VRAM)
 //  Access:   Azure Bastion Developer SKU (no public IP)
 //  Secrets:  Azure Key Vault (HF token, Sentinel workspace key)
 //  Logging:  Managed Identity → DCR → LAW (LlamaFirewallPrompts_CL)
@@ -354,7 +354,7 @@ resource nic 'Microsoft.Network/networkInterfaces@2023-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-//  LlamaFirewall VM — Standard_NC8as_T4_v3
+//  LlamaFirewall VM — Standard_NC4as_T4_v3
 //  8 vCPU / 56GB RAM / 1× NVIDIA T4 16GB VRAM
 //  System-Assigned Managed Identity for Key Vault + DCR access.
 //  Trusted Launch DISABLED — required for NVIDIA GPU driver binding on Ubuntu.
@@ -365,7 +365,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   location: location
   identity: { type: 'SystemAssigned' }
   properties: {
-    hardwareProfile: { vmSize: 'Standard_NC8as_T4_v3' }
+    hardwareProfile: { vmSize: 'Standard_NC4as_T4_v3' }
     securityProfile: {
       // Trusted Launch must be disabled for GPU VMs —
       // the NVIDIA kernel module cannot bind under vTPM/Secure Boot.
