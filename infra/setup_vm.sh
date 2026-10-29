@@ -62,18 +62,14 @@ done
 
 # --kv-name flag — Key Vault name for preprod/production secret retrieval
 # --foundry-endpoint flag — Foundry base URL for preprod/production
-for i in "${!@}"; do
-    if [[ "${!i}" == "--kv-name" ]]; then
-        next=$((i+1))
-        KV_NAME="${!next:-}"
-    elif [[ "${!i}" == --kv-name=* ]]; then
-        KV_NAME="${!i#--kv-name=}"
-    elif [[ "${!i}" == "--foundry-endpoint" ]]; then
-        next=$((i+1))
-        FOUNDRY_ENDPOINT="${!next:-}"
-    elif [[ "${!i}" == --foundry-endpoint=* ]]; then
-        FOUNDRY_ENDPOINT="${!i#--foundry-endpoint=}"
-    fi
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    case "${args[i]}" in
+        --kv-name)            KV_NAME="${args[i+1]:-}" ;;
+        --kv-name=*)          KV_NAME="${args[i]#--kv-name=}" ;;
+        --foundry-endpoint)   FOUNDRY_ENDPOINT="${args[i+1]:-}" ;;
+        --foundry-endpoint=*) FOUNDRY_ENDPOINT="${args[i]#--foundry-endpoint=}" ;;
+    esac
 done
 
 if [[ -z "${PROFILE}" ]]; then
@@ -233,7 +229,7 @@ pip install llamafirewall transformers torch fastapi uvicorn httpx --quiet
 ok "Python packages installed."
 
 log "Installing NOVA prompt pattern matching engine..."
-pip install nova-hunting --quiet
+pip install nova-hunting sentence-transformers --quiet
 ok "nova-hunting installed."
 
 # =============================================================================
